@@ -1,0 +1,32 @@
+# Build output directory
+/zig-out/
+
+# Zig cache directory
+/.zig-cache/
+
+# System-specific files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# IDE or editor-specific files
+.vscode/
+.idea/
+*.suo
+*.ntvs_analysis.dat
+*.njsproj
+*.sln
+*.csproj
+
+# Mac-specific files
+*.DS_Store
+
+# Windows-specific files
+*.lnk
+
+# Linux-specific files
+*.desktop
