@@ -15,16 +15,22 @@ pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8, start_port: u1
     var semaphore = Thread.Semaphore{ .permits = MAX_THREADS };
 
     var port: u16 = start_port;
-    while (port <= end_port) : (port += 1) {
+    while (port <= end_port) {
         if (port == 137) {
+            port += 1;
             continue;
         }
         semaphore.wait();
         _ = Thread.spawn(.{}, checkPortWrapper, .{ ip_address, port, &open_ports, &semaphore }) catch |err| {
             std.debug.print("SpawnError: {}\n", .{err});
             semaphore.post();
+            port += 1;
             continue;
         };
+        if (port == 65535) {
+            break;
+        }
+        port += 1;
     }
 
     // Wait for all threads to complete
