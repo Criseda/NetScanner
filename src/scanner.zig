@@ -7,34 +7,16 @@ const spawn = Thread.spawn;
 const SpawnConfig = Thread.SpawnConfig;
 const utils = @import("utils.zig");
 
-// pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8) !std.ArrayList(u16) {
-//     // Create a new ArrayList to store the open ports
-//     var open_ports = std.ArrayList(u16).init(allocator);
-
-//     var port: u16 = 3000; // Start scanning from port 1
-//     while (port <= 65535) : (port += 1) {
-//         std.debug.print("Checking port: {}\n", .{port});
-//         const address = net.Address.initIp4(ip_address, port);
-//         const stream = net.tcpConnectToAddress(address) catch {
-//             continue;
-//         };
-//         defer stream.close();
-//         // found an open port, add it to the list
-//         std.debug.print("Open port: {}\n", .{port});
-//         try open_ports.append(port);
-//     }
-//     return open_ports;
-// }
 const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
 
-pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8) !std.ArrayList(u16) {
+pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8, start_port: u16, end_port: u16) !std.ArrayList(u16) {
     var open_ports = std.ArrayList(u16).init(allocator);
     errdefer open_ports.deinit();
 
     var semaphore = Thread.Semaphore{ .permits = MAX_THREADS };
 
-    var port: u16 = 1;
-    while (port <= 3000) : (port += 1) {
+    var port: u16 = start_port;
+    while (port <= end_port) : (port += 1) {
         if (port == 137) {
             continue;
         }
@@ -69,6 +51,10 @@ fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !voi
                 std.debug.print("Access denied for port {}\n", .{port});
                 return;
             },
+            error.ConnectionTimedOut => {
+                std.debug.print("Connection timed out for port {}\n", .{port});
+                return;
+            },
             else => {
                 std.debug.print("Error connecting to port {}: {}\n", .{ port, err });
                 return;
@@ -81,14 +67,4 @@ fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !voi
     open_ports.append(port) catch |err| {
         std.debug.print("Error appending port {}: {}\n", .{ port, err });
     };
-}
-
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-    const ip_address = [4]u8{ 192, 168, 0, 13 };
-    const open_ports = try scanPorts(allocator, ip_address);
-    defer open_ports.deinit();
-
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("Open ports: {d}\n", .{open_ports.items});
 }
