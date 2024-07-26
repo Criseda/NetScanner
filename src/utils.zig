@@ -15,6 +15,12 @@ pub fn printUsage() !void {
     try stdout.print("{s}\n", .{usage});
 }
 
+pub fn printVersion() !void {
+    const version = "NetScanner is still in development";
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("{s}\n", .{version});
+}
+
 pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
     var ip_bytes: [4]u8 = undefined;
     var byte: u8 = 0;

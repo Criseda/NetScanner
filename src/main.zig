@@ -15,9 +15,15 @@ pub fn main() !void {
         return;
     }
 
-    // if args[1] is "--help" print the usage
-    if (std.mem.eql(u8, args[1], "--help")) {
+    const command = args[1];
+
+    // if command is "--help" print the usage
+    if (std.mem.eql(u8, command, "--help")) {
         try utils.printUsage();
+        return;
+    }
+    if (std.mem.eql(u8, command, "--version")) {
+        try utils.printVersion();
         return;
     }
 }
