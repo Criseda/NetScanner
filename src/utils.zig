@@ -9,14 +9,14 @@ pub fn printUsage() !void {
         \\ns -p <ip> <port-range>    Scan a single IP address for open ports (example: 192.168.1.1 1-1024)
         \\ns -s <subnet>             The subnet to scan for IPs in CIDR notation (example: 192.168.0.1/24)
         \\ns --help                  Display this help message
-        // \\ns --version               Display the version of NetScanner
+        \\ns --version               Display the version of NetScanner
     ;
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{s}\n", .{usage});
 }
 
 pub fn printVersion() !void {
-    const version = "NetScanner is still in development";
+    const version = "NetScanner: NetScanner is still in development";
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{s}\n", .{version});
 }
@@ -33,6 +33,9 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
             if (byte_index >= 4) {
                 return error.InvalidIpAddress;
             }
+            if (byte > 255) {
+                return error.InvalidIpAddress;
+            }
             ip_bytes[byte_index] = byte;
             byte = 0;
             byte_index += 1;
@@ -41,7 +44,13 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
         if (char < '0' or char > '9') {
             return error.InvalidIpAddress;
         }
-        byte = byte * 10 + (char - '0');
+        // Convert the character to a digit
+        const digit = char - '0';
+        // Check for overflow
+        if (byte > (255 - digit) / 10) {
+            return error.InvalidIpAddress;
+        }
+        byte = byte * 10 + digit;
     }
 
     if (byte_index != 3) {
@@ -53,7 +62,8 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
 
 pub fn splitStringToIntArray(allocator: std.mem.Allocator, string: []const u8, delimiter: u8) !([]u16) {
     // Initial allocation with a size of 2
-    var array: []u16 = try allocator.alloc(u16, 2);
+    var array: []u16 = try allocator.alloc(u16, 1);
+    errdefer allocator.free(array);
     var array_index: usize = 0;
     var number: u16 = 0;
     var string_index: usize = 0;
@@ -71,10 +81,22 @@ pub fn splitStringToIntArray(allocator: std.mem.Allocator, string: []const u8, d
             array_index += 1;
             continue;
         }
+        // Port specific checks (TODO: Refactor this into a separate function)
         if (char < '0' or char > '9') {
             return error.InvalidPortRange;
         }
-        number = number * 10 + (char - '0');
+        // Convert the character to a digit
+        const digit: u16 = char - '0';
+        // Check for overflow
+        if (number > (65535 - digit) / 10) {
+            return error.InvalidPortRange;
+        }
+        number = number * 10 + digit;
+
+        // Throw an error if the number is zero or less
+        if (number <= 0) {
+            return error.InvalidPortRange;
+        }
     }
 
     // Handle the last number after the loop

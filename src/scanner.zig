@@ -4,7 +4,6 @@ const posix = std.posix;
 const Thread = std.Thread;
 const Mutex = Thread.Mutex;
 const spawn = Thread.spawn;
-const SpawnConfig = Thread.SpawnConfig;
 const utils = @import("utils.zig");
 
 const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
@@ -21,7 +20,11 @@ pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8, start_port: u1
             continue;
         }
         semaphore.wait();
-        _ = try Thread.spawn(.{}, checkPortWrapper, .{ ip_address, port, &open_ports, &semaphore });
+        _ = Thread.spawn(.{}, checkPortWrapper, .{ ip_address, port, &open_ports, &semaphore }) catch |err| {
+            std.debug.print("SpawnError: {}\n", .{err});
+            semaphore.post();
+            continue;
+        };
     }
 
     // Wait for all threads to complete
@@ -33,13 +36,13 @@ pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8, start_port: u1
     return open_ports;
 }
 
-fn checkPortWrapper(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16), semaphore: *Thread.Semaphore) void {
+fn checkPortWrapper(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16), semaphore: *Thread.Semaphore) !void {
     defer semaphore.post();
-    checkPort(ip_address, port, open_ports) catch |err| {
-        std.debug.print("Error checking port {}: {}\n", .{ port, err });
-    };
+    try checkPort(ip_address, port, open_ports);
 }
+
 fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !void {
+    std.time.sleep(std.time.ns_per_ms * 5); // 10ms delay, adjust as needed
     const address = net.Address.initIp4(ip_address, port);
     const stream = net.tcpConnectToAddress(address) catch |err| {
         switch (err) {
@@ -53,6 +56,10 @@ fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !voi
             },
             error.ConnectionTimedOut => {
                 std.debug.print("Connection timed out for port {}\n", .{port});
+                return;
+            },
+            error.Unexpected => {
+                std.debug.print("Unexpected error for port {}\n", .{port});
                 return;
             },
             else => {
