@@ -25,7 +25,7 @@ const utils = @import("utils.zig");
 //     }
 //     return open_ports;
 // }
-const MAX_THREADS = 20; // Adjust this value based on your system's capabilities
+const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
 
 pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8) !std.ArrayList(u16) {
     var open_ports = std.ArrayList(u16).init(allocator);
@@ -34,7 +34,10 @@ pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8) !std.ArrayList
     var semaphore = Thread.Semaphore{ .permits = MAX_THREADS };
 
     var port: u16 = 1;
-    while (port <= 65535) : (port += 1) {
+    while (port <= 3000) : (port += 1) {
+        if (port == 137) {
+            continue;
+        }
         semaphore.wait();
         _ = try Thread.spawn(.{}, checkPortWrapper, .{ ip_address, port, &open_ports, &semaphore });
     }
