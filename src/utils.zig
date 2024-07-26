@@ -16,7 +16,7 @@ pub fn printUsage() !void {
 }
 
 pub fn printVersion() !void {
-    const version = "NetScanner: NetScanner is still in development";
+    const version = "v0.1.0";
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{s}\n", .{version});
 }
