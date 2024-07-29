@@ -162,7 +162,7 @@ pub fn pingHost(ip: [4]u8) !bool { //TODO: set this back to private once debuggi
     // Prepare the ICMP echo request packet
     var packet: [64]u8 = undefined;
     const id: u16 = 0x1234; // Arbitrary identifier
-    const seq: u16 = 0; // Sequence number
+    const seq: u16 = 0x0100; // Sequence number
 
     // ICMP header
     packet[0] = 8; // Type: Echo Request
@@ -185,6 +185,7 @@ pub fn pingHost(ip: [4]u8) !bool { //TODO: set this back to private once debuggi
     std.debug.print("Packet[2]: {x}\n", .{packet[2]});
     // print packet[3]
     std.debug.print("Packet[3]: {x}\n", .{packet[3]});
+    std.debug.print("packet variable: {x}\n", .{packet});
 
     //print the resulting packet
     std.debug.print("Sending the packet...\n", .{});
@@ -198,20 +199,21 @@ pub fn pingHost(ip: [4]u8) !bool { //TODO: set this back to private once debuggi
     std.debug.print("Receiving reply...\n", .{});
     // Receive the reply
     var buffer: [4096]u8 = undefined;
-    const timeout = std.time.ns_per_s * 5; // 5 second timeout
+    const timeout = std.time.ns_per_s * 10; // 10 second timeout
     const start_time = std.time.nanoTimestamp();
 
     while (std.time.nanoTimestamp() - start_time < timeout) {
-        const recv_result = posix.recv(socket, &buffer, 0) catch |err| {
+        const recv_result = posix.recv(socket, &buffer, 0x40) catch |err| {
             if (err == error.WouldBlock) {
-                std.time.sleep(10 * std.time.ns_per_ms); // Sleep for 10ms before trying again
+                std.debug.print("Would block, retrying...\n", .{});
+                std.time.sleep(1000 * std.time.ns_per_ms); // Sleep for 1s before trying again
                 continue;
             }
             return err;
         };
 
         if (recv_result > 0) {
-            std.debug.print("Received reply.\n", .{});
+            std.debug.print("Received reply: {x}\n", .{recv_result});
             return true;
         }
     }
