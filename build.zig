@@ -11,6 +11,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Add libc dependency if on windows
+    if (target.result.os.tag == .windows) {
+        exe.linkLibC();
+    }
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
