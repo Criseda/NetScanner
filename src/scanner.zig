@@ -5,6 +5,8 @@ const Thread = std.Thread;
 const Mutex = Thread.Mutex;
 const spawn = Thread.spawn;
 const utils = @import("utils.zig");
+const builtin = @import("builtin");
+const native_os = builtin.os.tag;
 
 const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
 
@@ -123,14 +125,14 @@ pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !std.ArrayLis
     return results;
 }
 
-fn scanIPWrapper(ip: [4]u8, results: *std.ArrayList(NetworkScanResult), semaphore: *Thread.Semaphore, allocator: std.mem.Allocator) !void {
+fn scanIPWrapper(ip: []const u8, results: *std.ArrayList(NetworkScanResult), semaphore: *Thread.Semaphore, allocator: std.mem.Allocator) !void {
     defer semaphore.post();
-    try scanIP(ip, results, allocator);
+    try scanIP(allocator, ip, results);
 }
 
-fn scanIP(ip: [4]u8, results: *std.ArrayList(NetworkScanResult)) !void {
+fn scanIP(allocator: std.mem.Allocator, ip: []const u8, results: *std.ArrayList(NetworkScanResult)) !void {
     // Check if the IP is online using ICMP ping
-    if (try pingHost(ip)) {
+    if (try pingHost(allocator, ip)) {
         // const name = try getHostName(allocator, ip); //TODO: IMPLEMENT
         // const manufacturer = try getManufacturer(allocator, ip); //TODO: IMPLEMENT
         // const mac_address = try getMacAddress(allocator, ip); //TODO: IMPLEMENT
@@ -147,101 +149,23 @@ fn scanIP(ip: [4]u8, results: *std.ArrayList(NetworkScanResult)) !void {
     }
 }
 
-pub fn pingHost(ip: [4]u8) !bool { //TODO: set this back to private once debugging is done
-    // Create a raw socket for ICMP
-    std.debug.print("Creating socket...\n", .{});
-    const socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.RAW, std.posix.IPPROTO.ICMP);
-    errdefer std.posix.close(socket);
-
-    // Allow the socket to reuse the address
-    std.debug.print("Setting socket options...\n", .{});
-    try std.posix.setsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
-    const address = std.net.Address.initIp4(ip, 0);
-
-    std.debug.print("Preparing ICMP packet...\n", .{});
-    // Prepare the ICMP echo request packet
-    var packet: [64]u8 = undefined;
-    const id: u16 = 0x1234; // Arbitrary identifier
-    const seq: u16 = 0x0100; // Sequence number
-
-    // ICMP header
-    packet[0] = 8; // Type: Echo Request
-    packet[1] = 0; // Code: 0
-    packet[2] = 0; // Checksum (to be filled in later)
-    packet[3] = 0; // Checksum (to be filled in later)
-    packet[4] = @intCast(id & 0xFF); // Identifier (lower byte)
-    packet[5] = @intCast((id >> 8) & 0xFF); // Identifier (upper byte)
-    packet[6] = @intCast(seq & 0xFF); //[0]; // Sequence number
-    packet[7] = @intCast((seq >> 8) & 0xFF); //[1]; // Sequence number
-
-    std.debug.print("Calculating checksum...\n", .{});
-    // Calculate checksum (simple placeholder, not a real checksum calculation)
-    const chk_sum = checksum(packet[0..8]);
-    packet[2] = @intCast(chk_sum & 0xFF); // Lower byte
-    packet[3] = @intCast((chk_sum >> 8) & 0xFF); // Higher byte
-    // print chksum
-    std.debug.print("Checksum: {x}\n", .{chk_sum});
-    // print packet[2]
-    std.debug.print("Packet[2]: {x}\n", .{packet[2]});
-    // print packet[3]
-    std.debug.print("Packet[3]: {x}\n", .{packet[3]});
-    std.debug.print("packet variable: {x}\n", .{packet});
-
-    //print the resulting packet
-    std.debug.print("Sending the packet...\n", .{});
-    // Send the packet
-    const sent_packet = std.posix.sendto(socket, &packet, 0, &address.any, address.getOsSockLen()) catch |err| {
-        std.debug.print("Error sending ICMP packet: {}\n", .{err});
-        return false;
+pub fn pingHost(allocator: std.mem.Allocator, ip: []const u8) !bool {
+    const ping_command = switch (native_os) {
+        .windows => &[_][]const u8{ "ping", "-n", "1", "-w", "1000", ip },
+        .linux, .macos => &[_][]const u8{ "ping", "-c", "1", "-W", "1", ip },
+        else => return error.UnsupportedOS,
     };
-    std.debug.print("Sent packet {x}\n", .{sent_packet});
 
-    std.debug.print("Receiving reply...\n", .{});
-    // Receive the reply
-    var buffer: [4096]u8 = undefined;
-    const timeout = std.time.ns_per_s * 10; // 10 second timeout
-    const start_time = std.time.nanoTimestamp();
+    var child = std.process.Child.init(ping_command, allocator);
+    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
 
-    while (std.time.nanoTimestamp() - start_time < timeout) {
-        const recv_result = posix.recv(socket, &buffer, 0x40) catch |err| {
-            if (err == error.WouldBlock) {
-                std.debug.print("Would block, retrying...\n", .{});
-                std.time.sleep(1000 * std.time.ns_per_ms); // Sleep for 1s before trying again
-                continue;
-            }
-            return err;
-        };
+    try child.spawn();
 
-        if (recv_result > 0) {
-            std.debug.print("Received reply: {x}\n", .{recv_result});
-            return true;
-        }
-    }
+    const term = try child.wait();
 
-    std.debug.print("Timeout reached.\n", .{});
-    return false;
-}
-
-fn checksum(data: []const u8) u16 {
-    var sum: u32 = 0;
-    var i: usize = 0;
-
-    // Process pairs of bytes
-    while (i + 1 < data.len) : (i += 2) {
-        sum += @as(u16, data[i]) | (@as(u16, data[i + 1]) << 8);
-    }
-
-    // If there's a remaining byte, process it
-    if (i < data.len) {
-        sum += @as(u16, data[i]);
-    }
-
-    // Fold 32-bit sum to 16 bits
-    while ((sum >> 16) != 0) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    const checksum_result: u16 = @intCast(~sum & 0xFFFF);
-
-    return checksum_result;
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }

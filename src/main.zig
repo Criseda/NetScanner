@@ -88,9 +88,8 @@ pub fn main() !void {
             return;
         }
         const ip_string = args[2];
-        const ip_bytes = try utils.ipStringToBytes(ip_string);
         std.debug.print("Scanning the network for host {s}\n", .{ip_string});
-        const pinged = try scanner.pingHost(ip_bytes);
+        const pinged = try scanner.pingHost(allocator, ip_string);
 
         if (pinged) {
             std.debug.print("Host is online\n", .{});
