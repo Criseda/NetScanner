@@ -143,7 +143,7 @@ fn scanIP(allocator: std.mem.Allocator, ip: [4]u8) !void {
 }
 
 pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
-    const ip_string = try allocator.dupe(u8, utils.ipBytesToString(ip));
+    const ip_string = try utils.ipBytesToString(allocator, ip);
 
     std.debug.print("Pinging host: {s}\n", .{ip_string});
 
