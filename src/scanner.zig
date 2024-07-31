@@ -89,31 +89,36 @@ fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !voi
 // Network scanner functionality
 
 pub const NetworkScanResult = struct {
-    ip: [4]u8,
+    ip: []const u8,
     name: []const u8,
     manufacturer: []const u8,
     mac_address: []const u8,
 };
 
-pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !std.ArrayList(NetworkScanResult) {
-    var results = std.ArrayList(NetworkScanResult).init(allocator);
-    errdefer results.deinit();
+pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !void {
+    const network = try utils.parseCidr(cidr);
 
-    const network = try utils.parseCidr(cidr); // implement this function in utils.zig
-    const ip_range = try utils.getIpRange(network); // implement this function in utils.zig
+    const ip_range = try utils.getIpRange(network);
+    std.debug.print("Scanning network range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d}\n", .{
+        ip_range.start[0], ip_range.start[1], ip_range.start[2], ip_range.start[3],
+        ip_range.end[0],   ip_range.end[1],   ip_range.end[2],   ip_range.end[3],
+    });
 
     var semaphore = Thread.Semaphore{ .permits = MAX_THREADS };
 
     var current_ip = ip_range.start;
-    while (current_ip <= ip_range.end) {
+    while (true) {
         semaphore.wait();
-        _ = Thread.spawn(.{}, scanIPWrapper, .{ current_ip, &results, &semaphore, allocator }) catch |err| {
+        _ = Thread.spawn(.{}, scanIPWrapper, .{ current_ip, &semaphore, allocator }) catch |err| {
             std.debug.print("SpawnError: {}\n", .{err});
             semaphore.post();
-            current_ip += 1;
+            utils.incrementIP(&current_ip);
             continue;
         };
-        current_ip += 1;
+        if (std.mem.eql(u8, &current_ip, &ip_range.end)) {
+            break;
+        }
+        utils.incrementIP(&current_ip);
     }
 
     // Wait for all threads to complete
@@ -121,38 +126,36 @@ pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !std.ArrayLis
     while (i < MAX_THREADS) : (i += 1) {
         semaphore.wait();
     }
-
-    return results;
 }
 
-fn scanIPWrapper(ip: []const u8, results: *std.ArrayList(NetworkScanResult), semaphore: *Thread.Semaphore, allocator: std.mem.Allocator) !void {
+fn scanIPWrapper(ip: [4]u8, semaphore: *Thread.Semaphore, allocator: std.mem.Allocator) !void {
     defer semaphore.post();
-    try scanIP(allocator, ip, results);
+    try scanIP(allocator, ip);
 }
 
-fn scanIP(allocator: std.mem.Allocator, ip: []const u8, results: *std.ArrayList(NetworkScanResult)) !void {
+fn scanIP(allocator: std.mem.Allocator, ip: [4]u8) !void {
+
     // Check if the IP is online using ICMP ping
-    if (try pingHost(allocator, ip)) {
-        // const name = try getHostName(allocator, ip); //TODO: IMPLEMENT
-        // const manufacturer = try getManufacturer(allocator, ip); //TODO: IMPLEMENT
-        // const mac_address = try getMacAddress(allocator, ip); //TODO: IMPLEMENT
-        const name: []const u8 = "Unknown";
-        const manufacturer: []const u8 = "Unknown";
-        const mac_address: []const u8 = "Unknown";
-
-        try results.append(NetworkScanResult{
-            .ip = ip,
-            .name = name,
-            .manufacturer = manufacturer,
-            .mac_address = mac_address,
-        });
-    }
+    _ = pingHost(allocator, ip) catch |err| {
+        std.debug.print("Error pinging host: {}\n", .{err});
+        return;
+    };
 }
 
-pub fn pingHost(allocator: std.mem.Allocator, ip: []const u8) !bool {
+pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
+    const ip_string = try allocator.dupe(u8, utils.ipBytesToString(ip));
+
+    std.debug.print("Pinging host: {s}\n", .{ip_string});
+
+    defer allocator.free(ip_string);
+
+    if (!std.unicode.utf8ValidateSlice(ip_string)) {
+        return error.InvalidWtf8;
+    }
+
     const ping_command = switch (native_os) {
-        .windows => &[_][]const u8{ "ping", "-n", "1", "-w", "1000", ip },
-        .linux, .macos => &[_][]const u8{ "ping", "-c", "1", "-W", "1", ip },
+        .windows => &[_][]const u8{ "ping", "-n", "1", "-w", "1000", ip_string },
+        .linux, .macos => &[_][]const u8{ "ping", "-c", "1", "-W", "1", ip_string },
         else => return error.UnsupportedOS,
     };
 
@@ -160,12 +163,19 @@ pub fn pingHost(allocator: std.mem.Allocator, ip: []const u8) !bool {
     child.stderr_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
 
-    try child.spawn();
+    child.spawn() catch |err| {
+        std.debug.print("Error spawning ping process: {?}\n", .{err});
+        return error.ProcessError;
+    };
 
     const term = try child.wait();
 
-    return switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    switch (term) {
+        .Exited => |code| {
+            if (code == 0) {
+                std.debug.print("Host {s} is online\n", .{ip_string});
+            }
+        },
+        else => {},
+    }
 }
