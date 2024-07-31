@@ -70,37 +70,8 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
     return ip_bytes;
 }
 
-pub fn ipBytesToString(ip_bytes: [4]u8) []const u8 {
-    // Initialize an array to hold the resulting string. The maximum length of an IP address in string form is 15 characters (including dots).
-    var ip_string: [15]u8 = undefined;
-    var index: usize = 0;
-
-    inline for (ip_bytes, 0..) |byte, i| {
-        if (i != 0) {
-            ip_string[index] = '.';
-            index += 1;
-        }
-        var byte_str = [3]u8{ 0, 0, 0 };
-        var byte_len: usize = 0;
-
-        var b = byte;
-        if (b == 0) {
-            byte_str[2] = '0';
-            byte_len = 1;
-        } else {
-            while (b != 0) : (b /= 10) {
-                byte_str[2 - byte_len] = '0' + (b % 10);
-                byte_len += 1;
-            }
-        }
-
-        for (byte_str[3 - byte_len .. 3]) |digit| {
-            ip_string[index] = digit;
-            index += 1;
-        }
-    }
-
-    return ip_string[0..index];
+pub fn ipBytesToString(allocator: std.mem.Allocator, ip: [4]u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
 }
 
 pub fn splitStringToIntArray(allocator: std.mem.Allocator, string: []const u8, delimiter: u8) !([]u16) {
