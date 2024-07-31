@@ -78,24 +78,13 @@ pub fn main() !void {
     }
     // if command is "-s"
     if (std.mem.eql(u8, command, "-s")) {
-        if (native_os == .windows) {
-            std.debug.print("NetScanner: This feature is not supported on Windows yet.\n", .{});
-            return;
-        }
-        // read the next argument, which is the IP
+        // read the next argument, which is the cidr
         if (args.len < 3) {
             try utils.printUsage();
             return;
         }
-        const ip_string = args[2];
-        const ip_bytes = try utils.ipStringToBytes(ip_string);
-        std.debug.print("Scanning the network for host {s}\n", .{ip_string});
-        const pinged = try scanner.pingHost(ip_bytes);
-
-        if (pinged) {
-            std.debug.print("Host is online\n", .{});
-        } else {
-            std.debug.print("Host is offline\n", .{});
-        }
+        const cidr = args[2];
+        std.debug.print("Scanning the network in range of {s}\n", .{cidr});
+        _ = try scanner.scanNetwork(allocator, cidr);
     }
 }
