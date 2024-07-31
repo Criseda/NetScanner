@@ -241,5 +241,7 @@ fn checksum(data: []const u8) u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    return @intCast(~sum & 0xFFFF);
+    const checksum_result: u16 = @intCast(~sum & 0xFFFF);
+
+    return checksum_result;
 }

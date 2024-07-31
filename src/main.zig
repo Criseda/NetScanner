@@ -1,6 +1,8 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
+const builtin = @import("builtin");
+const native_os = builtin.os.tag;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -76,6 +78,10 @@ pub fn main() !void {
     }
     // if command is "-s"
     if (std.mem.eql(u8, command, "-s")) {
+        if (native_os == .windows) {
+            std.debug.print("NetScanner: This feature is not supported on Windows yet.\n", .{});
+            return;
+        }
         // read the next argument, which is the IP
         if (args.len < 3) {
             try utils.printUsage();
