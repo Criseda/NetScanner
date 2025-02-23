@@ -5,6 +5,7 @@ const Thread = std.Thread;
 const Mutex = Thread.Mutex;
 const spawn = Thread.spawn;
 const utils = @import("utils.zig");
+const c_ping = @import("c.zig");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 
@@ -144,38 +145,16 @@ fn scanIP(allocator: std.mem.Allocator, ip: [4]u8) !void {
 
 pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
     const ip_string = try utils.ipBytesToString(allocator, ip);
-
-    std.debug.print("Pinging host: {s}\n", .{ip_string});
-
     defer allocator.free(ip_string);
 
     if (!std.unicode.utf8ValidateSlice(ip_string)) {
         return error.InvalidWtf8;
     }
 
-    const ping_command = switch (native_os) {
-        .windows => &[_][]const u8{ "ping", "-n", "1", "-w", "1000", ip_string },
-        .linux, .macos => &[_][]const u8{ "ping", "-c", "1", "-W", "1", ip_string },
-        else => return error.UnsupportedOS,
-    };
+    const ip_with_null = try allocator.dupeZ(u8, ip_string);
+    defer allocator.free(ip_with_null);
 
-    var child = std.process.Child.init(ping_command, allocator);
-    child.stderr_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-
-    child.spawn() catch |err| {
-        std.debug.print("Error spawning ping process: {?}\n", .{err});
-        return error.ProcessError;
-    };
-
-    const term = try child.wait();
-
-    switch (term) {
-        .Exited => |code| {
-            if (code == 0) {
-                std.debug.print("Host {s} is online\n", .{ip_string});
-            }
-        },
-        else => {},
+    if (c_ping.pingHost(ip_with_null.ptr)) {
+        std.debug.print("Host {s} is online\n", .{ip_string});
     }
 }
