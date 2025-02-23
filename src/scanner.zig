@@ -10,6 +10,7 @@ const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 
 const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
+const MAX_PING_THREADS = 15;
 
 // Scan port functionality
 
@@ -98,38 +99,33 @@ pub const NetworkScanResult = struct {
 
 pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !void {
     const network = try utils.parseCidr(cidr);
-
     const ip_range = try utils.getIpRange(network);
     std.debug.print("Scanning network range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d}\n", .{
         ip_range.start[0], ip_range.start[1], ip_range.start[2], ip_range.start[3],
         ip_range.end[0],   ip_range.end[1],   ip_range.end[2],   ip_range.end[3],
     });
 
-    var semaphore = Thread.Semaphore{ .permits = MAX_THREADS };
+    var threads = std.ArrayList(Thread).init(allocator);
+    defer threads.deinit();
+
+    var semaphore = Thread.Semaphore{ .permits = MAX_PING_THREADS };
 
     var current_ip = ip_range.start;
     while (true) {
         semaphore.wait();
-        _ = Thread.spawn(.{}, scanIPWrapper, .{ current_ip, &semaphore, allocator }) catch |err| {
-            std.debug.print("SpawnError: {}\n", .{err});
-            semaphore.post();
-            utils.incrementIP(&current_ip);
-            continue;
-        };
-        if (std.mem.eql(u8, &current_ip, &ip_range.end)) {
-            break;
-        }
+        const handle = try Thread.spawn(.{}, scanIPWrapper, .{ current_ip, allocator, &semaphore });
+        try threads.append(handle);
+        if (std.mem.eql(u8, &current_ip, &ip_range.end)) break;
         utils.incrementIP(&current_ip);
     }
 
-    // Wait for all threads to complete
-    var i: usize = 0;
-    while (i < MAX_THREADS) : (i += 1) {
-        semaphore.wait();
+    // Join all spawned threads.
+    for (threads.items) |handle| {
+        handle.join();
     }
 }
 
-fn scanIPWrapper(ip: [4]u8, semaphore: *Thread.Semaphore, allocator: std.mem.Allocator) !void {
+fn scanIPWrapper(ip: [4]u8, allocator: std.mem.Allocator, semaphore: *Thread.Semaphore) !void {
     defer semaphore.post();
     try scanIP(allocator, ip);
 }

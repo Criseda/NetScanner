@@ -25,7 +25,32 @@
 #define PING_TIMEOUT_MS 1000
 #define ICMP_ECHO_REQUEST 8
 
-bool ping_host(const char* ip_address) {
+// Add after the includes, before ping_host function
+#ifndef _WIN32
+unsigned short in_cksum(unsigned short *addr, int len) {
+  int nleft = len;
+  int sum = 0;
+  unsigned short *w = addr;
+  unsigned short answer = 0;
+
+  while (nleft > 1) {
+    sum += *w++;
+    nleft -= 2;
+  }
+
+  if (nleft == 1) {
+    *(unsigned char *)(&answer) = *(unsigned char *)w;
+    sum += answer;
+  }
+
+  sum = (sum >> 16) + (sum & 0xFFFF);
+  sum += (sum >> 16);
+  answer = ~sum;
+  return answer;
+}
+#endif
+
+bool ping_host(const char *ip_address) {
 #ifdef _WIN32
   HANDLE hIcmp;
   char send_data[32] = "ping test";
@@ -54,7 +79,7 @@ bool ping_host(const char* ip_address) {
   }
 
   reply_size = sizeof(ICMP_ECHO_REPLY) + sizeof(send_data);
-  reply_buffer = (VOID*)malloc(reply_size);
+  reply_buffer = (VOID *)malloc(reply_size);
 
   if (IcmpSendEcho(hIcmp, ip_addr, send_data, sizeof(send_data), NULL,
                    reply_buffer, reply_size, PING_TIMEOUT_MS) != 0) {
@@ -80,39 +105,65 @@ bool ping_host(const char* ip_address) {
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = inet_addr(ip_address);
 
-  // Set socket timeout
   struct timeval timeout;
   timeout.tv_sec = PING_TIMEOUT_MS / 1000;
   timeout.tv_usec = (PING_TIMEOUT_MS % 1000) * 1000;
-
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
-  // Prepare ICMP packet
-  uint8_t packet[64];
-  struct icmp* icmp_header = (struct icmp*)packet;
-
-  icmp_header->icmp_type = ICMP_ECHO_REQUEST;
+  // Prepare ICMP packet with header and payload
+  char send_data[32] = "ping test";  // payload
+  const size_t packet_size = sizeof(struct icmp) + sizeof(send_data);
+  char packet[packet_size];
+  struct icmp *icmp_header = (struct icmp *)packet;
+  icmp_header->icmp_type = ICMP_ECHO;
   icmp_header->icmp_code = 0;
-  icmp_header->icmp_cksum = 0;
-  icmp_header->icmp_id = getpid();
+  icmp_header->icmp_id = getpid() & 0xFFFF;
   icmp_header->icmp_seq = 1;
+  // Copy payload after the ICMP header
+  memcpy(packet + sizeof(struct icmp), send_data, sizeof(send_data));
+  icmp_header->icmp_cksum = 0;
+  icmp_header->icmp_cksum = in_cksum((unsigned short *)packet, packet_size);
 
-  // Send ICMP packet
-  if (sendto(sock, packet, sizeof(packet), 0, (struct sockaddr*)&addr,
+  // Send the complete packet
+  if (sendto(sock, packet, packet_size, 0, (struct sockaddr *)&addr,
              sizeof(addr)) <= 0) {
     close(sock);
     return false;
   }
 
-  // Receive response
-  uint8_t reply[512];
-  if (recvfrom(sock, reply, sizeof(reply), 0, NULL, NULL) <= 0) {
+  // Wait for a response (rest of the code follows unchanged)
+  char reply[1024];
+  struct sockaddr_in from;
+  socklen_t fromlen = sizeof(from);
+
+  int received = recvfrom(sock, reply, sizeof(reply), 0,
+                          (struct sockaddr *)&from, &fromlen);
+
+  if (received <= (int)(sizeof(struct ip) + sizeof(struct icmp))) {
     close(sock);
     return false;
   }
 
+  // Verify the reply came from the intended host
+  if (from.sin_addr.s_addr != addr.sin_addr.s_addr) {
+    close(sock);
+    return false;
+  }
+
+  // Skip IP header to get to ICMP header
+  struct ip *ip_header = (struct ip *)reply;
+  int ip_header_len = ip_header->ip_hl * 4;
+  if (received < ip_header_len + (int)sizeof(struct icmp)) {
+    close(sock);
+    return false;
+  }
+
+  struct icmp *icmp_reply = (struct icmp *)(reply + ip_header_len);
   close(sock);
-  return true;
+
+  // Validate that we received an ECHO REPLY with our ID
+  return (icmp_reply->icmp_type == ICMP_ECHOREPLY &&
+          icmp_reply->icmp_id == (getpid() & 0xFFFF));
 #endif
 }
