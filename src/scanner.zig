@@ -5,8 +5,14 @@ const Thread = std.Thread;
 const Mutex = Thread.Mutex;
 const spawn = Thread.spawn;
 const utils = @import("utils.zig");
+const c_ping = @import("c.zig");
+const builtin = @import("builtin");
+const native_os = builtin.os.tag;
 
 const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
+const MAX_PING_THREADS = 15;
+
+// Scan port functionality
 
 pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8, start_port: u16, end_port: u16) !std.ArrayList(u16) {
     var open_ports = std.ArrayList(u16).init(allocator);
@@ -80,4 +86,71 @@ fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !voi
     open_ports.append(port) catch |err| {
         std.debug.print("Error appending port {}: {}\n", .{ port, err });
     };
+}
+
+// Network scanner functionality
+
+pub const NetworkScanResult = struct {
+    ip: []const u8,
+    name: []const u8,
+    manufacturer: []const u8,
+    mac_address: []const u8,
+};
+
+pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !void {
+    const network = try utils.parseCidr(cidr);
+    const ip_range = try utils.getIpRange(network);
+    std.debug.print("Scanning network range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d}\n", .{
+        ip_range.start[0], ip_range.start[1], ip_range.start[2], ip_range.start[3],
+        ip_range.end[0],   ip_range.end[1],   ip_range.end[2],   ip_range.end[3],
+    });
+
+    var threads = std.ArrayList(Thread).init(allocator);
+    defer threads.deinit();
+
+    var semaphore = Thread.Semaphore{ .permits = MAX_PING_THREADS };
+
+    var current_ip = ip_range.start;
+    while (true) {
+        semaphore.wait();
+        const handle = try Thread.spawn(.{}, scanIPWrapper, .{ current_ip, allocator, &semaphore });
+        try threads.append(handle);
+        if (std.mem.eql(u8, &current_ip, &ip_range.end)) break;
+        utils.incrementIP(&current_ip);
+    }
+
+    // Join all spawned threads.
+    for (threads.items) |handle| {
+        handle.join();
+    }
+}
+
+fn scanIPWrapper(ip: [4]u8, allocator: std.mem.Allocator, semaphore: *Thread.Semaphore) !void {
+    defer semaphore.post();
+    try scanIP(allocator, ip);
+}
+
+fn scanIP(allocator: std.mem.Allocator, ip: [4]u8) !void {
+
+    // Check if the IP is online using ICMP ping
+    _ = pingHost(allocator, ip) catch |err| {
+        std.debug.print("Error pinging host: {}\n", .{err});
+        return;
+    };
+}
+
+pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
+    const ip_string = try utils.ipBytesToString(allocator, ip);
+    defer allocator.free(ip_string);
+
+    if (!std.unicode.utf8ValidateSlice(ip_string)) {
+        return error.InvalidWtf8;
+    }
+
+    const ip_with_null = try allocator.dupeZ(u8, ip_string);
+    defer allocator.free(ip_with_null);
+
+    if (c_ping.pingHost(ip_with_null.ptr)) {
+        std.debug.print("Host {s} is online\n", .{ip_string});
+    }
 }

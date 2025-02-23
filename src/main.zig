@@ -1,6 +1,8 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
+const builtin = @import("builtin");
+const native_os = builtin.os.tag;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -76,6 +78,13 @@ pub fn main() !void {
     }
     // if command is "-s"
     if (std.mem.eql(u8, command, "-s")) {
-        std.debug.print("NetScanner: Subnet scanning is not yet implemented\n", .{});
+        // read the next argument, which is the cidr
+        if (args.len < 3) {
+            try utils.printUsage();
+            return;
+        }
+        const cidr = args[2];
+        std.debug.print("Scanning the network in range of {s}\n", .{cidr});
+        _ = try scanner.scanNetwork(allocator, cidr);
     }
 }
