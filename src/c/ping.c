@@ -1,4 +1,4 @@
-#include "../include/ping.h"
+#include "ping.h"
 
 #include <stdbool.h>
 #include <stdio.h>

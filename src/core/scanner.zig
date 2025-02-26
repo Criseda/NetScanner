@@ -5,7 +5,7 @@ const Thread = std.Thread;
 const Mutex = Thread.Mutex;
 const spawn = Thread.spawn;
 const utils = @import("utils.zig");
-const c_ping = @import("c.zig");
+const c_bindings = @import("bindings");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 
@@ -150,7 +150,7 @@ pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
     const ip_with_null = try allocator.dupeZ(u8, ip_string);
     defer allocator.free(ip_with_null);
 
-    if (c_ping.pingHost(ip_with_null.ptr)) {
+    if (c_bindings.pingHost(ip_with_null.ptr)) {
         std.debug.print("Host {s} is online\n", .{ip_string});
     }
 }
