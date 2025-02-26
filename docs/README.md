@@ -32,9 +32,19 @@ ns --version               # Display version
 
 ## <a name="build">⚙️ Build </a>
 
+To build for your platform from source
+
 ```sh
 cd /path/to/repo     # Change to the project directory
 zig build            # Build the project
 cd ./zig-out/bin/    # Change to the output directory
 ns --help            # Run the program
+```
+
+(DEV) to build the cross-platform releases
+
+```sh
+cd /path/to/repo
+zig build release -Doptimize=ReleaseFast
+cd ./zig-out/bin/releases
 ```
