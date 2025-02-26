@@ -2,56 +2,22 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <minwindef.h>
-#include <IPExport.h>
-#include <WS2tcpip.h>
-#include <WinSock2.h>
-#include <Windows.h>
-#include <icmpapi.h>
-#include <iphlpapi.h>
-#else
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <netinet/ip_icmp.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
-
 #define PING_TIMEOUT_MS 1000
-#define ICMP_ECHO_REQUEST 8
 
-// Add after the includes, before ping_host function
-#ifndef _WIN32
-unsigned short in_cksum(unsigned short *addr, int len) {
-  int nleft = len;
-  int sum = 0;
-  unsigned short *w = addr;
-  unsigned short answer = 0;
-
-  while (nleft > 1) {
-    sum += *w++;
-    nleft -= 2;
-  }
-
-  if (nleft == 1) {
-    *(unsigned char *)(&answer) = *(unsigned char *)w;
-    sum += answer;
-  }
-
-  sum = (sum >> 16) + (sum & 0xFFFF);
-  sum += (sum >> 16);
-  answer = ~sum;
-  return answer;
-}
-#endif
+#ifdef _WIN32
+// Windows implementation
+#include <Windows.h>
+#include <minwindef.h>
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+#include <iphlpapi.h>
+#include <IPExport.h>
+#include <icmpapi.h>
 
 bool ping_host(const char *ip_address) {
-#ifdef _WIN32
   HANDLE hIcmp;
   char send_data[32] = "ping test";
   LPVOID reply_buffer;
@@ -87,14 +53,78 @@ bool ping_host(const char *ip_address) {
     IcmpCloseHandle(hIcmp);
     WSACleanup();
     return true;
-  } else {  // Added else block to handle IcmpSendEcho failure
+  } else {
     free(reply_buffer);
     IcmpCloseHandle(hIcmp);
     WSACleanup();
     return false;
   }
+}
+
+#elif defined(__APPLE__)
+// macOS implementation - use system ping command
+bool ping_host(const char *ip_address) {
+  char cmd[256];
+
+  // Build a command that will exit with status 0 if the host responds
+  // -c 1: send one packet
+  // -W 1: wait max 1 second
+  // -q: quiet output
+  snprintf(cmd, sizeof(cmd), "ping -c 1 -W 1 -q %s > /dev/null 2>&1",
+           ip_address);
+
+  // Execute command and check its exit status
+  int result = system(cmd);
+
+  // Return true if ping succeeded (exit status 0)
+  return (result == 0);
+}
 
 #else
+// Linux implementation
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/ip_icmp.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+// ICMP packet checksum calculation
+unsigned short in_cksum(unsigned short *addr, int len) {
+  int nleft = len;
+  int sum = 0;
+  unsigned short *w = addr;
+  unsigned short answer = 0;
+
+  while (nleft > 1) {
+    sum += *w++;
+    nleft -= 2;
+  }
+
+  if (nleft == 1) {
+    *(unsigned char *)(&answer) = *(unsigned char *)w;
+    sum += answer;
+  }
+
+  sum = (sum >> 16) + (sum & 0xFFFF);
+  sum += (sum >> 16);
+  answer = ~sum;
+  return answer;
+}
+
+// Simplified Linux ping implementation using raw sockets
+bool ping_host(const char *ip_address) {
+  // For testing non-root access, fall back to system ping
+  if (geteuid() != 0) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "ping -c 1 -W 1 -q %s > /dev/null 2>&1",
+             ip_address);
+    return system(cmd) == 0;
+  }
+
+  // Normal raw socket implementation (requires root)
   int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
   if (sock < 0) {
     return false;
@@ -111,59 +141,39 @@ bool ping_host(const char *ip_address) {
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
-  // Prepare ICMP packet with header and payload
-  char send_data[32] = "ping test";  // payload
-  const size_t packet_size = sizeof(struct icmp) + sizeof(send_data);
+  // Create ICMP packet
+  char send_data[32] = "ping test";
+  const size_t packet_size = sizeof(struct icmphdr) + sizeof(send_data);
   char packet[packet_size];
-  struct icmp *icmp_header = (struct icmp *)packet;
-  icmp_header->icmp_type = ICMP_ECHO;
-  icmp_header->icmp_code = 0;
-  icmp_header->icmp_id = getpid() & 0xFFFF;
-  icmp_header->icmp_seq = 1;
-  // Copy payload after the ICMP header
-  memcpy(packet + sizeof(struct icmp), send_data, sizeof(send_data));
-  icmp_header->icmp_cksum = 0;
-  icmp_header->icmp_cksum = in_cksum((unsigned short *)packet, packet_size);
+  struct icmphdr *icmp_header = (struct icmphdr *)packet;
 
-  // Send the complete packet
+  // Set up ICMP header
+  icmp_header->type = ICMP_ECHO;
+  icmp_header->code = 0;
+  icmp_header->un.echo.id = getpid() & 0xFFFF;
+  icmp_header->un.echo.sequence = 1;
+
+  // Copy payload after the ICMP header
+  memcpy(packet + sizeof(struct icmphdr), send_data, sizeof(send_data));
+  icmp_header->checksum = 0;
+  icmp_header->checksum = in_cksum((unsigned short *)packet, packet_size);
+
+  // Send the packet
   if (sendto(sock, packet, packet_size, 0, (struct sockaddr *)&addr,
              sizeof(addr)) <= 0) {
     close(sock);
     return false;
   }
 
-  // Wait for a response (rest of the code follows unchanged)
+  // Wait for response
   char reply[1024];
   struct sockaddr_in from;
   socklen_t fromlen = sizeof(from);
-
   int received = recvfrom(sock, reply, sizeof(reply), 0,
                           (struct sockaddr *)&from, &fromlen);
-
-  if (received <= (int)(sizeof(struct ip) + sizeof(struct icmp))) {
-    close(sock);
-    return false;
-  }
-
-  // Verify the reply came from the intended host
-  if (from.sin_addr.s_addr != addr.sin_addr.s_addr) {
-    close(sock);
-    return false;
-  }
-
-  // Skip IP header to get to ICMP header
-  struct ip *ip_header = (struct ip *)reply;
-  int ip_header_len = ip_header->ip_hl * 4;
-  if (received < ip_header_len + (int)sizeof(struct icmp)) {
-    close(sock);
-    return false;
-  }
-
-  struct icmp *icmp_reply = (struct icmp *)(reply + ip_header_len);
   close(sock);
 
-  // Validate that we received an ECHO REPLY with our ID
-  return (icmp_reply->icmp_type == ICMP_ECHOREPLY &&
-          icmp_reply->icmp_id == (getpid() & 0xFFFF));
-#endif
+  // Simple check: did we get any reply from the target?
+  return (received > 0 && from.sin_addr.s_addr == addr.sin_addr.s_addr);
 }
+#endif
