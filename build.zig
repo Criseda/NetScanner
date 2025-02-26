@@ -181,7 +181,7 @@ fn createExecutable(b: *std.Build, target_cross: std.zig.CrossTarget, optimize: 
 
     // Create the executable
     const exe = b.addExecutable(.{
-        .name = if (target_cross.os_tag.? == .windows) "ns.exe" else "ns",
+        .name = "ns",
         .root_source_file = b.path("src/core/main.zig"),
         .target = resolved_target,
         .optimize = optimize,
