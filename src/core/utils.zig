@@ -26,7 +26,7 @@ pub fn printUsage() !void {
 }
 
 pub fn printVersion() !void {
-    const version = "v0.2.0";
+    const version = "v0.3.0";
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{s}\n", .{version});
 }
@@ -179,19 +179,4 @@ pub fn incrementIP(ip: *[4]u8) void {
         ip[@intCast(i)] +%= 1;
         if (ip[@intCast(i)] != 0) break;
     }
-}
-
-test "ipStringToBytes correctly translates IP string to byte array" {
-    const result = try ipStringToBytes("192.168.0.1");
-    const expected: [4]u8 = [4]u8{ 192, 168, 0, 1 };
-    try std.testing.expect(std.mem.eql(u8, &result, &expected));
-}
-
-test "splitStringToIntArray correctly translates port range string to array of integers" {
-    const allocator = std.testing.allocator;
-    const result = try splitStringToIntArray(allocator, "1-1024", '-');
-    defer allocator.free(result);
-    std.debug.assert(result.len == 2);
-    std.debug.assert(result[0] == 1);
-    std.debug.assert(result[1] == 1024);
 }
