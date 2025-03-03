@@ -43,8 +43,6 @@ pub fn main() !void {
             std.debug.print("NetScanner: Invalid IP address\n", .{});
             return;
         };
-        //print the ip_bytes for now
-        std.debug.print("{d}.{d}.{d}.{d}\n", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] });
 
         const port_range = args[3];
         const port_array = utils.splitStringToIntArray(allocator, port_range, '-') catch {
@@ -63,8 +61,6 @@ pub fn main() !void {
             port_array[1] = temp;
         }
         defer allocator.free(port_array);
-        //print the ports for now
-        std.debug.print("{d}-{d}\n", .{ port_array[0], port_array[1] });
 
         const ip_address = [4]u8{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] };
         const start_port = port_array[0];
@@ -84,7 +80,6 @@ pub fn main() !void {
             return;
         }
         const cidr = args[2];
-        std.debug.print("Scanning the network in range of {s}\n", .{cidr});
         _ = try scanner.scanNetwork(allocator, cidr);
     }
 }
