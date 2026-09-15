@@ -253,13 +253,12 @@ const Discovery = struct {
     }
 };
 
-/// Run `worker` once per IP from first to last, capped by the semaphore
-/// in shares, and wait for every thread before returning.
+/// Run `worker` once per IP in the list, capped by the semaphore in
+/// shares, and wait for every thread before returning.
 fn sweepHosts(
     allocator: std.mem.Allocator,
     shares: Discovery,
-    first_ip: [4]u8,
-    last_ip: [4]u8,
+    ips: []const [4]u8,
     comptime worker: fn (Discovery, [4]u8) void,
 ) void {
     var threads: std.ArrayList(Thread) = .empty;
@@ -268,15 +267,11 @@ fn sweepHosts(
         threads.deinit(allocator);
     }
 
-    var current_ip = first_ip;
-    while (true) {
-        const last = std.mem.eql(u8, &current_ip, &last_ip);
+    for (ips) |ip| {
         shares.sem.waitUncancelable(shares.io);
-        const handle = Thread.spawn(.{}, worker, .{ shares, current_ip }) catch |err| {
+        const handle = Thread.spawn(.{}, worker, .{ shares, ip }) catch |err| {
             std.debug.print("SpawnError: {}\n", .{err});
             shares.sem.post(shares.io);
-            if (last) break;
-            utils.incrementIP(&current_ip);
             continue;
         };
         threads.append(allocator, handle) catch |err| {
@@ -284,8 +279,6 @@ fn sweepHosts(
             handle.join();
             shares.sem.post(shares.io);
         };
-        if (last) break;
-        utils.incrementIP(&current_ip);
     }
 }
 
@@ -327,7 +320,9 @@ pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u
     };
 
     const hosts = utils.usableHosts(network, ip_range);
-    sweepHosts(allocator, shares, hosts.start, hosts.end, pingWorker);
+    var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
+    defer targets.deinit(allocator);
+    sweepHosts(allocator, shares, targets.items, pingWorker);
 }
 
 fn pingWorker(shares: Discovery, ip: [4]u8) void {
@@ -357,12 +352,12 @@ const TCP_PROBE_PORT = 80;
 
 /// Find live hosts in a subnet, fast and without root.
 ///
-/// Two steps: probe one common TCP port per IP (a connect that succeeds
-/// or is actively refused proves the host is up; only a timeout means
-/// "no answer"), then read the `arp -a` table. Every probe attempt --
-/// even a failed one -- triggers ARP, and quiet devices that ignore TCP
-/// still answer ARP, so anything with a complete entry that step one
-/// missed is reported as "(arp)".
+/// Three steps: probe one common TCP port per IP (a connect that
+/// succeeds or is actively refused proves the host is up; only a
+/// timeout means "no answer"), read the `arp -a` table for quiet
+/// devices that ignore TCP, then ping each harvest-only candidate
+/// once before reporting it -- ARP entries linger after hosts leave,
+/// so a complete entry alone is not proof.
 pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
@@ -384,7 +379,9 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
         .found_mutex = &found_mutex,
         .sem = &sem,
     };
-    sweepHosts(allocator, shares, hosts.start, hosts.end, tcpWorker);
+    var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
+    defer targets.deinit(allocator);
+    sweepHosts(allocator, shares, targets.items, tcpWorker);
 
     harvestArp(shares, hosts.start, hosts.end);
 }
@@ -404,21 +401,44 @@ fn tcpProbe(io: std.Io, ip: [4]u8) bool {
     };
 }
 
-/// Read the local ARP table and report in-range hosts the TCP sweep
-/// missed. Needs no privileges; `arp -a` exists on macOS, Linux and
-/// Windows (only the first two formats are parsed for now).
+/// Read the local ARP table for in-range hosts the TCP sweep missed,
+/// then ping each candidate once before reporting it. The ping matters:
+/// entries linger up to ~20min after a host leaves, so a complete entry
+/// alone is not proof. Needs no privileges; `arp -a` exists on macOS,
+/// Linux and Windows (only the first two formats are parsed for now).
 fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
-    const result = std.process.run(shares.allocator, shares.io, .{ .argv = &.{ "arp", "-a" } }) catch |err| {
-        std.debug.print("arp harvest skipped: {}\n", .{err});
-        return;
-    };
-    defer shares.allocator.free(result.stdout);
-    defer shares.allocator.free(result.stderr);
+    const table = readArpTable(shares) orelse return;
+    defer shares.allocator.free(table);
 
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    var candidates: std.ArrayList([4]u8) = .empty;
+    defer candidates.deinit(shares.allocator);
+    var lines = std.mem.splitScalar(u8, table, '\n');
     while (lines.next()) |line| {
         const ip = utils.parseArpLine(line) orelse continue;
         if (!utils.ipInRange(ip, first_ip, last_ip)) continue;
-        if (!shares.isFound(ip)) shares.reportHost(ip, " (arp)");
+        if (shares.isFound(ip)) continue;
+        candidates.append(shares.allocator, ip) catch continue;
     }
+    if (candidates.items.len == 0) return;
+
+    // One ping each, in parallel over the shared semaphore (all TCP
+    // permits are free again by now). Only hosts that answer get the
+    // "(arp)" report.
+    sweepHosts(shares.allocator, shares, candidates.items, verifyWorker);
+}
+
+/// Dump `arp -a`. Returns the output for the caller to free, or null
+/// when arp is missing -- then discovery just ends after the TCP sweep.
+fn readArpTable(shares: Discovery) ?[]u8 {
+    const result = std.process.run(shares.allocator, shares.io, .{ .argv = &.{ "arp", "-a" } }) catch |err| {
+        std.debug.print("arp harvest skipped: {}\n", .{err});
+        return null;
+    };
+    shares.allocator.free(result.stderr);
+    return result.stdout;
+}
+
+fn verifyWorker(shares: Discovery, ip: [4]u8) void {
+    defer shares.sem.post(shares.io);
+    if (pingHost(shares.allocator, ip)) shares.reportHost(ip, " (arp)");
 }
