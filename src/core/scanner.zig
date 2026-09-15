@@ -14,8 +14,6 @@ const c_bindings = @import("bindings");
 
 /// How many ports to probe at once.
 const MAX_PORT_THREADS = 100;
-/// How many ping processes to run at once.
-const MAX_PING_THREADS = 15;
 /// How many TCP probes to run at once.
 const MAX_TCP_THREADS = 128;
 /// Cap for one TCP connect attempt, in milliseconds. Bounds discovery
@@ -324,8 +322,62 @@ fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, ra
     });
 }
 
-/// Slow path: one ICMP ping process per host. Kept as a fallback for
-/// networks where TCP probing is filtered; prefer scanNetwork.
+/// Ping every IP in the list with one child process each, all running
+/// concurrently. Returns which hosts answered, same order as input.
+/// Caller frees the result.
+///
+/// One batch instead of one process per thread: libc serializes
+/// concurrent system() calls process-wide, which used to turn every
+/// ping sweep serial (~2s/host). posix-spawned children have no such
+/// lock, so a whole subnet resolves in about one wait each.
+fn pingSweep(allocator: std.mem.Allocator, io: std.Io, ips: []const [4]u8) ![]bool {
+    // ping(1) -W units: milliseconds on macOS, seconds elsewhere --
+    // both spell ~1s. Matches the WARNING in src/c/ping.c.
+    const wait_arg = switch (comptime builtin.os.tag) {
+        .macos => "1000",
+        else => "1",
+    };
+
+    const alive = try allocator.alloc(bool, ips.len);
+    errdefer allocator.free(alive);
+
+    const ip_strings = try allocator.alloc([]const u8, ips.len);
+    defer {
+        for (ip_strings) |s| allocator.free(s);
+        allocator.free(ip_strings);
+    }
+    for (ips, 0..) |ip, i| {
+        ip_strings[i] = try utils.ipBytesToString(allocator, ip);
+    }
+
+    var children: std.ArrayList(std.process.Child) = .empty;
+    defer children.deinit(allocator);
+    for (ip_strings) |ip_string| {
+        const argv = [_][]const u8{ "ping", "-c", "1", "-W", wait_arg, "-q", ip_string };
+        const child = try std.process.spawn(io, .{
+            .argv = &argv,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        });
+        try children.append(allocator, child);
+    }
+
+    for (children.items, 0..) |*child, i| {
+        const term = child.wait(io) catch {
+            alive[i] = false;
+            continue;
+        };
+        alive[i] = switch (term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+    }
+    return alive;
+}
+
+/// Slow path: ICMP ping sweep. Kept as a fallback for networks where
+/// TCP probing is filtered; prefer scanNetwork.
 pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
@@ -334,31 +386,27 @@ pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u
     printScanHeader(io, &stdout_mutex, cidr, ip_range);
     const started = std.Io.Clock.now(.awake, io);
 
-    var sem: std.Io.Semaphore = .{ .permits = MAX_PING_THREADS };
-    var found: std.ArrayList([4]u8) = .empty;
-    defer found.deinit(allocator);
-    var found_mutex: std.Io.Mutex = .init;
-    const shares = Discovery{
-        .io = io,
-        .allocator = allocator,
-        .stdout_mutex = &stdout_mutex,
-        .found = &found,
-        .found_mutex = &found_mutex,
-        .sem = &sem,
-    };
-
+    // Single-threaded from here: one batch, then report. No locks needed
+    // beyond the printer's own mutex.
     const hosts = utils.usableHosts(network, ip_range);
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
-    sweepHosts(allocator, shares, targets.items, pingWorker);
+
+    const alive = try pingSweep(allocator, io, targets.items);
+    defer allocator.free(alive);
+
+    var found: std.ArrayList([4]u8) = .empty;
+    defer found.deinit(allocator);
+    for (targets.items, alive) |ip, is_up| {
+        if (!is_up) continue;
+        found.append(allocator, ip) catch continue;
+        utils.printStdout(io, &stdout_mutex, "Host {d}.{d}.{d}.{d} is online\n", .{
+            ip[0], ip[1], ip[2], ip[3],
+        });
+    }
 
     const elapsed = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
     printSummary(io, &stdout_mutex, found.items, elapsed);
-}
-
-fn pingWorker(shares: Discovery, ip: [4]u8) void {
-    defer shares.sem.post(shares.io);
-    if (pingHost(shares.allocator, ip)) shares.reportHost(ip, "");
 }
 
 /// Ping one host through the C helper. Returns true when it answers.
@@ -413,9 +461,17 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
     };
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
+    // TEMP #39: phase timing.
+    const t0 = std.Io.Clock.now(.awake, io);
     sweepHosts(allocator, shares, targets.items, tcpWorker);
+    const t1 = std.Io.Clock.now(.awake, io);
 
     harvestArp(shares, hosts.start, hosts.end);
+    const t2 = std.Io.Clock.now(.awake, io);
+    std.debug.print("TEMP phases: sweep={}ms harvest+verify={}ms\n", .{
+        @divTrunc(t0.durationTo(t1).nanoseconds, std.time.ns_per_ms),
+        @divTrunc(t1.durationTo(t2).nanoseconds, std.time.ns_per_ms),
+    });
 
     const elapsed = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
     printSummary(io, &stdout_mutex, found.items, elapsed);
@@ -456,10 +512,13 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     }
     if (candidates.items.len == 0) return;
 
-    // One ping each, in parallel over the shared semaphore (all TCP
-    // permits are free again by now). Only hosts that answer get the
+    // One batch for all candidates: only hosts that answer get the
     // "(arp)" report.
-    sweepHosts(shares.allocator, shares, candidates.items, verifyWorker);
+    const alive = pingSweep(shares.allocator, shares.io, candidates.items) catch return;
+    defer shares.allocator.free(alive);
+    for (candidates.items, alive) |ip, is_up| {
+        if (is_up) shares.reportHost(ip, " (arp)");
+    }
 }
 
 /// Dump the neighbour table. Prefers `arp -a`, falls back to
@@ -486,9 +545,4 @@ fn readArpTable(shares: Discovery) ?[]u8 {
     }
     std.debug.print("arp harvest skipped: neither `arp` nor `ip` found\n", .{});
     return null;
-}
-
-fn verifyWorker(shares: Discovery, ip: [4]u8) void {
-    defer shares.sem.post(shares.io);
-    if (pingHost(shares.allocator, ip)) shares.reportHost(ip, " (arp)");
 }
