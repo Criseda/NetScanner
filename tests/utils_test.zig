@@ -75,3 +75,16 @@ test "incrementIP increments IP address correctly" {
     const expected_overflow: [4]u8 = [4]u8{ 0, 0, 0, 0 };
     try std.testing.expectEqualSlices(u8, &expected_overflow, &ip);
 }
+
+test "decrementIP decrements IP address correctly" {
+    var ip: [4]u8 = [4]u8{ 192, 168, 1, 0 };
+    utils.decrementIP(&ip);
+    const expected: [4]u8 = [4]u8{ 192, 168, 0, 255 };
+    try std.testing.expectEqualSlices(u8, &expected, &ip);
+
+    // Test underflow
+    ip = [4]u8{ 0, 0, 0, 0 };
+    utils.decrementIP(&ip);
+    const expected_underflow: [4]u8 = [4]u8{ 255, 255, 255, 255 };
+    try std.testing.expectEqualSlices(u8, &expected_underflow, &ip);
+}

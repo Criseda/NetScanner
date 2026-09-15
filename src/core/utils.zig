@@ -198,3 +198,12 @@ pub fn incrementIP(ip: *[4]u8) void {
         if (ip[@intCast(i)] != 0) break;
     }
 }
+
+pub fn decrementIP(ip: *[4]u8) void {
+    var i: i32 = 3;
+    while (i >= 0) : (i -= 1) {
+        const old = ip[@intCast(i)];
+        ip[@intCast(i)] -%= 1;
+        if (old != 0) break;
+    }
+}

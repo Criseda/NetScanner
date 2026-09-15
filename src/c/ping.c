@@ -68,9 +68,10 @@ bool ping_host(const char *ip_address) {
 
   // Build a command that will exit with status 0 if the host responds
   // -c 1: send one packet
-  // -W 1: wait max 1 second
+  // -W 1000: wait max 1000ms for a reply (macOS -W is in milliseconds;
+  //   1ms misses hosts whose ARP entry is cold, causing false negatives)
   // -q: quiet output
-  snprintf(cmd, sizeof(cmd), "ping -c 1 -W 1 -q %s > /dev/null 2>&1",
+  snprintf(cmd, sizeof(cmd), "ping -c 1 -W 1000 -q %s > /dev/null 2>&1",
            ip_address);
 
   // Execute command and check its exit status

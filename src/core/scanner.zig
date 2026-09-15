@@ -156,7 +156,16 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
 
     var sem: std.Io.Semaphore = .{ .permits = MAX_PING_THREADS };
 
-    var current_ip = ip_range.start;
+    // Skip the network and broadcast addresses: they are not hosts.
+    // (/31 and /32 have no such addresses, so only skip for prefix < 31.)
+    var first_ip = ip_range.start;
+    var last_ip = ip_range.end;
+    if (network.prefix_len < 31) {
+        utils.incrementIP(&first_ip);
+        utils.decrementIP(&last_ip);
+    }
+
+    var current_ip = first_ip;
     while (true) {
         sem.waitUncancelable(io);
         const ctx = PingScanCtx{
@@ -169,7 +178,7 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
         const handle = Thread.spawn(.{}, scanIPWorker, .{ctx}) catch |err| {
             std.debug.print("SpawnError: {}\n", .{err});
             sem.post(io);
-            if (std.mem.eql(u8, &current_ip, &ip_range.end)) break;
+            if (std.mem.eql(u8, &current_ip, &last_ip)) break;
             utils.incrementIP(&current_ip);
             continue;
         };
@@ -178,7 +187,7 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
             handle.join();
             sem.post(io);
         };
-        if (std.mem.eql(u8, &current_ip, &ip_range.end)) break;
+        if (std.mem.eql(u8, &current_ip, &last_ip)) break;
         utils.incrementIP(&current_ip);
     }
 
