@@ -10,7 +10,11 @@ pub const IpRange = struct {
     end: [4]u8,
 };
 
-pub fn printUsage() !void {
+fn stdoutWriter(io: std.Io, buffer: []u8) std.Io.File.Writer {
+    return .init(.stdout(), io, buffer);
+}
+
+pub fn printUsage(io: std.Io) !void {
     const usage =
         \\ns <command>
         \\
@@ -21,14 +25,29 @@ pub fn printUsage() !void {
         \\ns --help                  Display this help message
         \\ns --version               Display the version of NetScanner
     ;
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("{s}\n", .{usage});
+    var buf: [1024]u8 = undefined;
+    var w = stdoutWriter(io, &buf);
+    try w.interface.print("{s}\n", .{usage});
+    try w.interface.flush();
 }
 
-pub fn printVersion() !void {
+pub fn printVersion(io: std.Io) !void {
     const version = "v0.3.0";
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("{s}\n", .{version});
+    var buf: [64]u8 = undefined;
+    var w = stdoutWriter(io, &buf);
+    try w.interface.print("{s}\n", .{version});
+    try w.interface.flush();
+}
+
+/// Print a line to stdout. Each call flushes, so it is safe to use from
+/// multiple threads as long as callers serialize with `mutex`.
+pub fn printStdout(io: std.Io, mutex: *std.Io.Mutex, comptime fmt: []const u8, args: anytype) void {
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    var buf: [1024]u8 = undefined;
+    var w = stdoutWriter(io, &buf);
+    w.interface.print(fmt, args) catch {};
+    w.interface.flush() catch {};
 }
 
 pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
@@ -124,7 +143,7 @@ pub fn splitStringToIntArray(allocator: std.mem.Allocator, string: []const u8, d
 }
 
 pub fn parseCidr(cidr: []const u8) !Network {
-    var iter = std.mem.split(u8, cidr, "/");
+    var iter = std.mem.splitScalar(u8, cidr, '/');
     const ip_str = iter.next() orelse return error.InvalidCidr;
     const prefix_str = iter.next() orelse return error.InvalidCidr;
 
@@ -138,7 +157,6 @@ pub fn parseCidr(cidr: []const u8) !Network {
     return Network{ .address = address, .prefix_len = prefix_len };
 }
 
-//TODO: FIX THIS
 pub fn getIpRange(network: Network) !IpRange {
     const mask: u32 = computeMask(network.prefix_len);
     const start_ip = (@as(u32, network.address[0]) << 24) | (@as(u32, network.address[1]) << 16) | (@as(u32, network.address[2]) << 8) | network.address[3];

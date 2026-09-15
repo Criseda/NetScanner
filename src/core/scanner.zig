@@ -1,94 +1,124 @@
 const std = @import("std");
-const net = std.net;
-const posix = std.posix;
 const Thread = std.Thread;
-const Mutex = Thread.Mutex;
-const spawn = Thread.spawn;
 const utils = @import("utils.zig");
 const c_bindings = @import("bindings");
-const builtin = @import("builtin");
-const native_os = builtin.os.tag;
 
 const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
 const MAX_PING_THREADS = 15;
 
 // Scan port functionality
 
-pub fn scanPorts(allocator: std.mem.Allocator, ip_address: [4]u8, start_port: u16, end_port: u16) !std.ArrayList(u16) {
-    var open_ports = std.ArrayList(u16).init(allocator);
-    errdefer open_ports.deinit();
+pub fn scanPorts(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    ip_address: [4]u8,
+    start_port: u16,
+    end_port: u16,
+) !std.ArrayList(u16) {
+    var open_ports: std.ArrayList(u16) = .empty;
+    errdefer open_ports.deinit(allocator);
 
-    var semaphore = Thread.Semaphore{ .permits = MAX_THREADS };
+    var ports_mutex: std.Io.Mutex = .init;
+    var stdout_mutex: std.Io.Mutex = .init;
+    var sem: std.Io.Semaphore = .{ .permits = MAX_THREADS };
+
+    var threads: std.ArrayList(Thread) = .empty;
+    errdefer {
+        for (threads.items) |t| t.join();
+        threads.deinit(allocator);
+    }
 
     var port: u16 = start_port;
-    while (port <= end_port) {
+    while (true) {
         if (port == 137) {
+            if (port == end_port) break;
             port += 1;
             continue;
         }
-        semaphore.wait();
-        _ = Thread.spawn(.{}, checkPortWrapper, .{ ip_address, port, &open_ports, &semaphore }) catch |err| {
+        sem.waitUncancelable(io);
+        const ctx = PortScanCtx{
+            .io = io,
+            .ip = ip_address,
+            .port = port,
+            .allocator = allocator,
+            .open_ports = &open_ports,
+            .ports_mutex = &ports_mutex,
+            .stdout_mutex = &stdout_mutex,
+            .sem = &sem,
+        };
+        const t = Thread.spawn(.{}, checkPortWorker, .{ctx}) catch |err| {
             std.debug.print("SpawnError: {}\n", .{err});
-            semaphore.post();
+            sem.post(io);
+            if (port == end_port or port == 65535) break;
             port += 1;
             continue;
         };
-        if (port == 65535) {
-            break;
-        }
+        threads.append(allocator, t) catch |err| {
+            std.debug.print("Error tracking thread: {}\n", .{err});
+            // Thread is already running; detach is not available here, join it now.
+            t.join();
+            sem.post(io);
+        };
+        if (port == end_port or port == 65535) break;
         port += 1;
     }
 
-    // Wait for all threads to complete
-    var i: usize = 0;
-    while (i < MAX_THREADS) : (i += 1) {
-        semaphore.wait();
-    }
+    // Join all spawned threads before returning the list.
+    for (threads.items) |t| t.join();
+    threads.deinit(allocator);
 
     return open_ports;
 }
 
-fn checkPortWrapper(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16), semaphore: *Thread.Semaphore) !void {
-    defer semaphore.post();
-    try checkPort(ip_address, port, open_ports);
+const PortScanCtx = struct {
+    io: std.Io,
+    ip: [4]u8,
+    port: u16,
+    allocator: std.mem.Allocator,
+    open_ports: *std.ArrayList(u16),
+    ports_mutex: *std.Io.Mutex,
+    stdout_mutex: *std.Io.Mutex,
+    sem: *std.Io.Semaphore,
+};
+
+fn checkPortWorker(ctx: PortScanCtx) void {
+    defer ctx.sem.post(ctx.io);
+    checkPort(ctx) catch |err| {
+        std.debug.print("Error checking port {}: {}\n", .{ ctx.port, err });
+    };
 }
 
-fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !void {
-    std.time.sleep(std.time.ns_per_ms * 5); // 10ms delay, adjust as needed
+fn checkPort(ctx: PortScanCtx) !void {
+    const io = ctx.io;
+    // Small throttle to avoid overwhelming the target.
+    io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake) catch {};
 
-    const address = net.Address.initIp4(ip_address, port);
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = ctx.ip, .port = ctx.port } };
 
-    const stdout = std.io.getStdOut().writer();
-
-    const stream = net.tcpConnectToAddress(address) catch |err| {
+    var stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
         switch (err) {
-            error.ConnectionRefused => {
-                std.debug.print("Port is closed: {}\n", .{port});
-                return;
-            }, // Expected for closed ports
-            error.PermissionDenied => {
-                std.debug.print("Access denied for port {}\n", .{port});
+            error.ConnectionRefused => return, // Expected for closed ports; stay quiet.
+            error.AccessDenied => {
+                std.debug.print("Access denied for port {}\n", .{ctx.port});
                 return;
             },
-            error.ConnectionTimedOut => {
-                std.debug.print("Connection timed out for port {}\n", .{port});
-                return;
-            },
-            error.Unexpected => {
-                std.debug.print("Unexpected error for port {}\n", .{port});
+            error.Timeout => {
+                std.debug.print("Connection timed out for port {}\n", .{ctx.port});
                 return;
             },
             else => {
-                std.debug.print("Error connecting to port {}: {}\n", .{ port, err });
+                std.debug.print("Error connecting to port {}: {}\n", .{ ctx.port, err });
                 return;
             },
         }
     };
-    defer stream.close();
+    defer stream.close(io);
 
-    try stdout.print("Open port: {}\n", .{port});
-    open_ports.append(port) catch |err| {
-        std.debug.print("Error appending port {}: {}\n", .{ port, err });
+    utils.printStdout(io, ctx.stdout_mutex, "Open port: {}\n", .{ctx.port});
+    ctx.ports_mutex.lockUncancelable(io);
+    defer ctx.ports_mutex.unlock(io);
+    ctx.open_ports.append(ctx.allocator, ctx.port) catch |err| {
+        std.debug.print("Error appending port {}: {}\n", .{ ctx.port, err });
     };
 }
 
@@ -101,12 +131,12 @@ pub const NetworkScanResult = struct {
     mac_address: []const u8,
 };
 
-pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !void {
+pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
-    const stdout = std.io.getStdOut().writer();
 
-    try stdout.print("Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
+    var stdout_mutex: std.Io.Mutex = .init;
+    utils.printStdout(io, &stdout_mutex, "Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
         cidr,
         ip_range.start[0],
         ip_range.start[1],
@@ -118,16 +148,36 @@ pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !void {
         ip_range.end[3],
     });
 
-    var threads = std.ArrayList(Thread).init(allocator);
-    defer threads.deinit();
+    var threads: std.ArrayList(Thread) = .empty;
+    errdefer {
+        for (threads.items) |t| t.join();
+        threads.deinit(allocator);
+    }
 
-    var semaphore = Thread.Semaphore{ .permits = MAX_PING_THREADS };
+    var sem: std.Io.Semaphore = .{ .permits = MAX_PING_THREADS };
 
     var current_ip = ip_range.start;
     while (true) {
-        semaphore.wait();
-        const handle = try Thread.spawn(.{}, scanIPWrapper, .{ current_ip, allocator, &semaphore });
-        try threads.append(handle);
+        sem.waitUncancelable(io);
+        const ctx = PingScanCtx{
+            .io = io,
+            .ip = current_ip,
+            .allocator = allocator,
+            .stdout_mutex = &stdout_mutex,
+            .sem = &sem,
+        };
+        const handle = Thread.spawn(.{}, scanIPWorker, .{ctx}) catch |err| {
+            std.debug.print("SpawnError: {}\n", .{err});
+            sem.post(io);
+            if (std.mem.eql(u8, &current_ip, &ip_range.end)) break;
+            utils.incrementIP(&current_ip);
+            continue;
+        };
+        threads.append(allocator, handle) catch |err| {
+            std.debug.print("Error tracking thread: {}\n", .{err});
+            handle.join();
+            sem.post(io);
+        };
         if (std.mem.eql(u8, &current_ip, &ip_range.end)) break;
         utils.incrementIP(&current_ip);
     }
@@ -136,24 +186,33 @@ pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !void {
     for (threads.items) |handle| {
         handle.join();
     }
+    threads.deinit(allocator);
 }
 
-fn scanIPWrapper(ip: [4]u8, allocator: std.mem.Allocator, semaphore: *Thread.Semaphore) !void {
-    defer semaphore.post();
-    try scanIP(allocator, ip);
+const PingScanCtx = struct {
+    io: std.Io,
+    ip: [4]u8,
+    allocator: std.mem.Allocator,
+    stdout_mutex: *std.Io.Mutex,
+    sem: *std.Io.Semaphore,
+};
+
+fn scanIPWorker(ctx: PingScanCtx) void {
+    defer ctx.sem.post(ctx.io);
+    scanIP(ctx) catch |err| {
+        std.debug.print("Error scanning host: {}\n", .{err});
+    };
 }
 
-fn scanIP(allocator: std.mem.Allocator, ip: [4]u8) !void {
-
+fn scanIP(ctx: PingScanCtx) !void {
     // Check if the IP is online using ICMP ping
-    _ = pingHost(allocator, ip) catch |err| {
+    pingHost(ctx.allocator, ctx.io, ctx.stdout_mutex, ctx.ip) catch |err| {
         std.debug.print("Error pinging host: {}\n", .{err});
         return;
     };
 }
 
-pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
-    const stdout = std.io.getStdOut().writer();
+pub fn pingHost(allocator: std.mem.Allocator, io: std.Io, stdout_mutex: *std.Io.Mutex, ip: [4]u8) !void {
     const ip_string = try utils.ipBytesToString(allocator, ip);
     defer allocator.free(ip_string);
 
@@ -165,6 +224,6 @@ pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
     defer allocator.free(ip_with_null);
 
     if (c_bindings.pingHost(ip_with_null.ptr)) {
-        try stdout.print("Host {s} is online\n", .{ip_string});
+        utils.printStdout(io, stdout_mutex, "Host {s} is online\n", .{ip_string});
     }
 }

@@ -5,8 +5,10 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Create a module for the core functionality
-    const core_module = b.addModule("core", .{
+    const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/core.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
     // Set up include directories
@@ -16,40 +18,46 @@ pub fn build(b: *std.Build) void {
     };
 
     // Create module for C bindings
-    const bindings_module = b.addModule("bindings", .{
+    const bindings_module = b.createModule(.{
         .root_source_file = b.path("src/c/c_bindings.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
     // Add dependencies after creating the module
     bindings_module.addImport("core", core_module);
 
     // Main executable
-    const exe = b.addExecutable(.{
-        .name = "ns",
+    const exe_module = b.createModule(.{
         .root_source_file = b.path("src/core/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "core", .module = core_module },
+            .{ .name = "bindings", .module = bindings_module },
+        },
+    });
+    const exe = b.addExecutable(.{
+        .name = "ns",
+        .root_module = exe_module,
     });
 
-    exe.root_module.addImport("core", core_module);
-    exe.root_module.addImport("bindings", bindings_module);
-
-    exe.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
+    exe_module.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
     // Add ALL include paths
     for (include_dirs) |dir| {
-        exe.addIncludePath(b.path(dir));
+        exe_module.addIncludePath(b.path(dir));
     }
 
     // Link required system libraries
     switch (target.result.os.tag) {
         .windows => {
-            exe.linkSystemLibrary("iphlpapi");
-            exe.linkSystemLibrary("ws2_32");
+            exe_module.linkSystemLibrary("iphlpapi", .{});
+            exe_module.linkSystemLibrary("ws2_32", .{});
         },
         else => {},
     }
 
-    exe.linkLibC();
     b.installArtifact(exe);
 
     // Run command
@@ -62,29 +70,34 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Tests
-    const main_tests = b.addTest(.{
+    const test_module = b.createModule(.{
         .root_source_file = b.path("tests/main_test.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "core", .module = core_module },
+            .{ .name = "bindings", .module = bindings_module },
+        },
+    });
+    const main_tests = b.addTest(.{
+        .root_module = test_module,
     });
 
-    main_tests.root_module.addImport("core", core_module);
-    main_tests.root_module.addImport("bindings", bindings_module);
-    main_tests.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
+    test_module.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
     // Add ALL include paths to test
     for (include_dirs) |dir| {
-        main_tests.addIncludePath(b.path(dir));
+        test_module.addIncludePath(b.path(dir));
     }
 
     // Link libraries for tests
     switch (target.result.os.tag) {
         .windows => {
-            main_tests.linkSystemLibrary("iphlpapi");
-            main_tests.linkSystemLibrary("ws2_32");
+            test_module.linkSystemLibrary("iphlpapi", .{});
+            test_module.linkSystemLibrary("ws2_32", .{});
         },
         else => {},
     }
-    main_tests.linkLibC();
 
     const run_tests = b.addRunArtifact(main_tests);
     const test_step = b.step("test", "Run all tests");
@@ -95,7 +108,7 @@ pub fn build(b: *std.Build) void {
 
     // Define all targets
     // Define all targets with proper ABI settings
-    const targets = [_]std.zig.CrossTarget{
+    const targets = [_]std.Target.Query{
         // Windows (x86_64)
         .{
             .cpu_arch = .x86_64,
@@ -156,10 +169,15 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-fn createExecutable(b: *std.Build, target_cross: std.zig.CrossTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn createExecutable(b: *std.Build, target_cross: std.Target.Query, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    // Convert CrossTarget to ResolvedTarget
+    const resolved_target = b.resolveTargetQuery(target_cross);
+
     // Create a module for the core functionality
-    const core_module = b.addModule("core", .{
+    const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/core.zig"),
+        .target = resolved_target,
+        .optimize = optimize,
     });
 
     // Set up include directories
@@ -169,43 +187,46 @@ fn createExecutable(b: *std.Build, target_cross: std.zig.CrossTarget, optimize: 
     };
 
     // Create module for C bindings
-    const bindings_module = b.addModule("bindings", .{
+    const bindings_module = b.createModule(.{
         .root_source_file = b.path("src/c/c_bindings.zig"),
+        .target = resolved_target,
+        .optimize = optimize,
     });
 
     // Add dependencies after creating the module
     bindings_module.addImport("core", core_module);
 
-    // Convert CrossTarget to ResolvedTarget
-    const resolved_target = b.resolveTargetQuery(target_cross);
-
     // Create the executable
-    const exe = b.addExecutable(.{
-        .name = "ns",
+    const exe_module = b.createModule(.{
         .root_source_file = b.path("src/core/main.zig"),
         .target = resolved_target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "core", .module = core_module },
+            .{ .name = "bindings", .module = bindings_module },
+        },
+    });
+    const exe = b.addExecutable(.{
+        .name = "ns",
+        .root_module = exe_module,
     });
 
-    exe.root_module.addImport("core", core_module);
-    exe.root_module.addImport("bindings", bindings_module);
-
-    exe.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
+    exe_module.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
 
     // Add include paths
     for (include_dirs) |dir| {
-        exe.addIncludePath(b.path(dir));
+        exe_module.addIncludePath(b.path(dir));
     }
 
     // Link required system libraries
     switch (target_cross.os_tag.?) {
         .windows => {
-            exe.linkSystemLibrary("iphlpapi");
-            exe.linkSystemLibrary("ws2_32");
+            exe_module.linkSystemLibrary("iphlpapi", .{});
+            exe_module.linkSystemLibrary("ws2_32", .{});
         },
         else => {},
     }
 
-    exe.linkLibC();
     return exe;
 }

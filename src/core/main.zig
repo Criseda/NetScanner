@@ -1,20 +1,17 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
-const builtin = @import("builtin");
-const native_os = builtin.os.tag;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const gpa = init.gpa;
+    const arena = init.arena.allocator();
 
-    // gets the arguments passed to the program
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Gets the arguments passed to the program.
+    const args = try init.minimal.args.toSlice(arena);
 
     if (args.len < 2) {
-        try utils.printUsage();
+        try utils.printUsage(io);
         return;
     }
 
@@ -22,12 +19,12 @@ pub fn main() !void {
 
     // if command is "--help" print the usage
     if (std.mem.eql(u8, command, "--help")) {
-        try utils.printUsage();
+        try utils.printUsage(io);
         return;
     }
     // if command is "--version" print the version
     if (std.mem.eql(u8, command, "--version")) {
-        try utils.printVersion();
+        try utils.printVersion(io);
         return;
     }
     // if command is "-p"
@@ -35,7 +32,7 @@ pub fn main() !void {
     // - look for the next argument, which should be a port range
     if (std.mem.eql(u8, command, "-p")) {
         if (args.len < 4) {
-            try utils.printUsage();
+            try utils.printUsage(io);
             return;
         }
         const ip_string = args[2];
@@ -45,13 +42,13 @@ pub fn main() !void {
         };
 
         const port_range = args[3];
-        const port_array = utils.splitStringToIntArray(allocator, port_range, '-') catch {
+        const port_array = utils.splitStringToIntArray(gpa, port_range, '-') catch {
             std.debug.print("NetScanner: Invalid port range\n", .{});
             return;
         };
         if (port_array.len != 2) {
             std.debug.print("NetScanner: Please provide two ports\n", .{});
-            defer allocator.free(port_array);
+            defer gpa.free(port_array);
             return;
         }
         //if the first port is more than the second port, swap them
@@ -60,26 +57,35 @@ pub fn main() !void {
             port_array[0] = port_array[1];
             port_array[1] = temp;
         }
-        defer allocator.free(port_array);
+        defer gpa.free(port_array);
 
         const ip_address = [4]u8{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] };
         const start_port = port_array[0];
         const end_port = port_array[1];
 
-        const open_ports = try scanner.scanPorts(allocator, ip_address, start_port, end_port);
-        defer open_ports.deinit();
+        var open_ports = try scanner.scanPorts(gpa, io, ip_address, start_port, end_port);
+        defer open_ports.deinit(gpa);
 
-        const stdout = std.io.getStdOut().writer();
-        try stdout.print("Open ports: {d}\n", .{open_ports.items});
+        var stdout_mutex: std.Io.Mutex = .init;
+        if (open_ports.items.len == 0) {
+            utils.printStdout(io, &stdout_mutex, "No open ports found\n", .{});
+        } else {
+            utils.printStdout(io, &stdout_mutex, "Open ports: ", .{});
+            for (open_ports.items, 0..) |p, i| {
+                if (i > 0) utils.printStdout(io, &stdout_mutex, ", ", .{});
+                utils.printStdout(io, &stdout_mutex, "{d}", .{p});
+            }
+            utils.printStdout(io, &stdout_mutex, "\n", .{});
+        }
     }
     // if command is "-s"
     if (std.mem.eql(u8, command, "-s")) {
         // read the next argument, which is the cidr
         if (args.len < 3) {
-            try utils.printUsage();
+            try utils.printUsage(io);
             return;
         }
         const cidr = args[2];
-        _ = try scanner.scanNetwork(allocator, cidr);
+        _ = try scanner.scanNetwork(gpa, io, cidr);
     }
 }
