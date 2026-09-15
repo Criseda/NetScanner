@@ -88,4 +88,14 @@ pub fn main(init: std.process.Init) !void {
         const cidr = args[2];
         _ = try scanner.scanNetwork(gpa, io, cidr);
     }
+    // if command is "-t" (experiment 2: TCP-connect discovery + ARP harvest)
+    if (std.mem.eql(u8, command, "-t")) {
+        // read the next argument, which is the cidr
+        if (args.len < 3) {
+            try utils.printUsage(io);
+            return;
+        }
+        const cidr = args[2];
+        _ = try scanner.scanTcp(gpa, io, cidr);
+    }
 }

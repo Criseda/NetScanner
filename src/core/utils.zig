@@ -22,6 +22,7 @@ pub fn printUsage(io: std.Io) !void {
         \\
         \\ns -p <ip> <port-range>    Scan a single IP address for open ports (example: 192.168.1.1 1-1024)
         \\ns -s <subnet>             The subnet to scan for IPs in CIDR notation (example: 192.168.0.1/24)
+        \\ns -t <subnet>             Fast TCP-connect discovery + ARP harvest (experimental)
         \\ns --help                  Display this help message
         \\ns --version               Display the version of NetScanner
     ;
@@ -206,4 +207,26 @@ pub fn decrementIP(ip: *[4]u8) void {
         ip[@intCast(i)] -%= 1;
         if (old != 0) break;
     }
+}
+
+pub fn ipToU32(ip: [4]u8) u32 {
+    return (@as(u32, ip[0]) << 24) | (@as(u32, ip[1]) << 16) | (@as(u32, ip[2]) << 8) | ip[3];
+}
+
+pub fn ipInRange(ip: [4]u8, first: [4]u8, last: [4]u8) bool {
+    const value = ipToU32(ip);
+    return value >= ipToU32(first) and value <= ipToU32(last);
+}
+
+/// Parse one `arp -a` line into an IP address.
+///
+/// Understands macOS/Linux style:
+///   "? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]"
+/// Returns null for incomplete entries, multicast lines and anything
+/// unparseable (including the Windows format, for now).
+pub fn parseArpLine(line: []const u8) ?[4]u8 {
+    if (std.mem.indexOf(u8, line, "incomplete") != null) return null;
+    const open = std.mem.indexOfScalar(u8, line, '(') orelse return null;
+    const close = std.mem.indexOfScalarPos(u8, line, open, ')') orelse return null;
+    return ipStringToBytes(line[open + 1 .. close]) catch null;
 }

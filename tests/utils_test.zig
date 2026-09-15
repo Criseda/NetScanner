@@ -88,3 +88,28 @@ test "decrementIP decrements IP address correctly" {
     const expected_underflow: [4]u8 = [4]u8{ 255, 255, 255, 255 };
     try std.testing.expectEqualSlices(u8, &expected_underflow, &ip);
 }
+
+test "ipInRange checks bounds inclusively" {
+    const first = [4]u8{ 192, 168, 1, 1 };
+    const last = [4]u8{ 192, 168, 1, 254 };
+    try std.testing.expect(utils.ipInRange([4]u8{ 192, 168, 1, 1 }, first, last));
+    try std.testing.expect(utils.ipInRange([4]u8{ 192, 168, 1, 254 }, first, last));
+    try std.testing.expect(utils.ipInRange([4]u8{ 192, 168, 1, 100 }, first, last));
+    try std.testing.expect(!utils.ipInRange([4]u8{ 192, 168, 1, 0 }, first, last));
+    try std.testing.expect(!utils.ipInRange([4]u8{ 192, 168, 1, 255 }, first, last));
+    try std.testing.expect(!utils.ipInRange([4]u8{ 192, 168, 2, 1 }, first, last));
+}
+
+test "parseArpLine reads macOS and Linux arp -a lines" {
+    const mac = utils.parseArpLine("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
+    try std.testing.expect(mac != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &mac.?);
+
+    const linux = utils.parseArpLine("? (192.168.1.20) at aa:bb:cc:dd:ee:ff [ether] on eth0");
+    try std.testing.expect(linux != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 20 }, &linux.?);
+
+    // Incomplete entries and garbage yield null.
+    try std.testing.expect(utils.parseArpLine("? (192.168.1.22) at (incomplete) on en0 ifscope [ethernet]") == null);
+    try std.testing.expect(utils.parseArpLine("not an arp line") == null);
+}
