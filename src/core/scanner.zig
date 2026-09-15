@@ -282,6 +282,33 @@ fn sweepHosts(
     }
 }
 
+/// Print the closing recap: every found host sorted numerically, then
+/// a one-line count plus elapsed time. The streaming "is online" lines
+/// stay as live progress; this block is the diffable record, so it
+/// takes the lock once for the whole block instead of per line.
+fn printSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, found: [][4]u8, elapsed_ns: i96) void {
+    std.mem.sort([4]u8, found, {}, ipLessThan);
+
+    const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    const noun: []const u8 = if (found.len == 1) "host" else "hosts";
+
+    stdout_mutex.lockUncancelable(io);
+    defer stdout_mutex.unlock(io);
+    var buf: [1024]u8 = undefined;
+    var writer: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    const out = &writer.interface;
+    for (found) |ip| {
+        out.print("{d}.{d}.{d}.{d}\n", .{ ip[0], ip[1], ip[2], ip[3] }) catch return;
+        out.flush() catch return;
+    }
+    out.print("{d} {s} up ({d:.1}s)\n", .{ found.len, noun, seconds }) catch {};
+    out.flush() catch {};
+}
+
+fn ipLessThan(_: void, a: [4]u8, b: [4]u8) bool {
+    return utils.ipToU32(a) < utils.ipToU32(b);
+}
+
 /// Print the one-line header every network scan starts with.
 fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, range: utils.IpRange) void {
     utils.printStdout(io, stdout_mutex, "Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
@@ -305,6 +332,7 @@ pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u
 
     var stdout_mutex: std.Io.Mutex = .init;
     printScanHeader(io, &stdout_mutex, cidr, ip_range);
+    const started = std.Io.Clock.now(.awake, io);
 
     var sem: std.Io.Semaphore = .{ .permits = MAX_PING_THREADS };
     var found: std.ArrayList([4]u8) = .empty;
@@ -323,6 +351,9 @@ pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
     sweepHosts(allocator, shares, targets.items, pingWorker);
+
+    const elapsed = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
+    printSummary(io, &stdout_mutex, found.items, elapsed);
 }
 
 fn pingWorker(shares: Discovery, ip: [4]u8) void {
@@ -364,6 +395,7 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
 
     var stdout_mutex: std.Io.Mutex = .init;
     printScanHeader(io, &stdout_mutex, cidr, ip_range);
+    const started = std.Io.Clock.now(.awake, io);
 
     const hosts = utils.usableHosts(network, ip_range);
 
@@ -384,6 +416,9 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
     sweepHosts(allocator, shares, targets.items, tcpWorker);
 
     harvestArp(shares, hosts.start, hosts.end);
+
+    const elapsed = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
+    printSummary(io, &stdout_mutex, found.items, elapsed);
 }
 
 fn tcpWorker(shares: Discovery, ip: [4]u8) void {
