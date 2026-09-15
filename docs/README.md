@@ -20,8 +20,9 @@ Command-line tool written in Zig for scanning and analyzing local networks
 ## <a name="usage">✨ Usage</a>
 
 ```sh
-ns -p <ip> <port-range>    # Scan a single IP address for open ports (example: 192.168.1.1 1-1024)
-ns -s <subnet>             # The subnet to scan for IPs in CIDR notation (example: 192.168.0.1/24)
+ns -p <ip> <port-range>    # Scan one IP for open ports (example: 192.168.1.1 1-1024)
+ns -s <subnet> [--ping]    # Find live hosts (example: 192.168.0.1/24)
+                           # Default is fast TCP + ARP discovery; --ping uses ICMP instead
 ns --help                  # Display help message
 ns --version               # Display version
 ```

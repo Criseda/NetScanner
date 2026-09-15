@@ -100,8 +100,7 @@ test "ipInRange checks bounds inclusively" {
     try std.testing.expect(!utils.ipInRange([4]u8{ 192, 168, 2, 1 }, first, last));
 }
 
-test "parseArpLine reads macOS and Linux arp -a lines" {
-    const mac = utils.parseArpLine("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
+test "parseArpLine reads macOS and Linux arp -a lines" {    const mac = utils.parseArpLine("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
     try std.testing.expect(mac != null);
     try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &mac.?);
 
@@ -112,4 +111,19 @@ test "parseArpLine reads macOS and Linux arp -a lines" {
     // Incomplete entries and garbage yield null.
     try std.testing.expect(utils.parseArpLine("? (192.168.1.22) at (incomplete) on en0 ifscope [ethernet]") == null);
     try std.testing.expect(utils.parseArpLine("not an arp line") == null);
+}
+
+test "usableHosts skips network and broadcast addresses" {
+    const network = utils.Network{ .address = .{ 192, 168, 1, 0 }, .prefix_len = 24 };
+    const range = utils.IpRange{ .start = .{ 192, 168, 1, 0 }, .end = .{ 192, 168, 1, 255 } };
+    const hosts = utils.usableHosts(network, range);
+    try std.testing.expectEqualSlices(u8, &.{ 192, 168, 1, 1 }, &hosts.start);
+    try std.testing.expectEqualSlices(u8, &.{ 192, 168, 1, 254 }, &hosts.end);
+
+    // /31 and /32 ranges pass through untouched.
+    const tiny = utils.Network{ .address = .{ 10, 0, 0, 0 }, .prefix_len = 31 };
+    const tiny_range = utils.IpRange{ .start = .{ 10, 0, 0, 0 }, .end = .{ 10, 0, 0, 1 } };
+    const tiny_hosts = utils.usableHosts(tiny, tiny_range);
+    try std.testing.expectEqualSlices(u8, &tiny_range.start, &tiny_hosts.start);
+    try std.testing.expectEqualSlices(u8, &tiny_range.end, &tiny_hosts.end);
 }

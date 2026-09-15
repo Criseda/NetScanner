@@ -1,13 +1,27 @@
+//! NetScanner's scanning engine: host discovery and port scanning.
+//!
+//! Everything here runs without root privileges. Host discovery pairs a
+//! fast TCP-connect sweep with an ARP-table harvest, because many LAN
+//! devices (phones, tablets, printers) silently drop TCP packets yet
+//! still answer ARP. A slower one-ping-per-host sweep remains available
+//! as a fallback.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Thread = std.Thread;
 const utils = @import("utils.zig");
 const c_bindings = @import("bindings");
 
-const MAX_THREADS = 100; // Adjust this value based on your system's capabilities
+/// How many ports to probe at once.
+const MAX_PORT_THREADS = 100;
+/// How many ping processes to run at once.
 const MAX_PING_THREADS = 15;
+/// How many TCP probes to run at once.
+const MAX_TCP_THREADS = 128;
 
-// Scan port functionality
+// ---------------------------------------------------------------------------
+// Port scanning: try every TCP port in a range on one IP.
+// ---------------------------------------------------------------------------
 
 pub fn scanPorts(
     allocator: std.mem.Allocator,
@@ -21,7 +35,7 @@ pub fn scanPorts(
 
     var ports_mutex: std.Io.Mutex = .init;
     var stdout_mutex: std.Io.Mutex = .init;
-    var sem: std.Io.Semaphore = .{ .permits = MAX_THREADS };
+    var sem: std.Io.Semaphore = .{ .permits = MAX_PORT_THREADS };
 
     var threads: std.ArrayList(Thread) = .empty;
     errdefer {
@@ -31,6 +45,8 @@ pub fn scanPorts(
 
     var port: u16 = start_port;
     while (true) {
+        // Port 137 (NetBIOS) is skipped: it is noisy and commonly
+        // filtered, so probing it adds time without information.
         if (port == 137) {
             if (port == end_port) break;
             port += 1;
@@ -123,31 +139,33 @@ fn checkPort(ctx: PortScanCtx) !void {
     };
 }
 
-// Network scanner functionality
+// ---------------------------------------------------------------------------
+// Host discovery.
+// ---------------------------------------------------------------------------
 
-pub const NetworkScanResult = struct {
-    ip: []const u8,
-    name: []const u8,
-    manufacturer: []const u8,
-    mac_address: []const u8,
-};
+/// Print the one-line header every network scan starts with.
+fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, range: utils.IpRange) void {
+    utils.printStdout(io, stdout_mutex, "Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
+        cidr,
+        range.start[0],
+        range.start[1],
+        range.start[2],
+        range.start[3],
+        range.end[0],
+        range.end[1],
+        range.end[2],
+        range.end[3],
+    });
+}
 
-pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
+/// Slow path: one ICMP ping process per host. Kept as a fallback for
+/// networks where TCP probing is filtered; prefer scanNetwork.
+pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
 
     var stdout_mutex: std.Io.Mutex = .init;
-    utils.printStdout(io, &stdout_mutex, "Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
-        cidr,
-        ip_range.start[0],
-        ip_range.start[1],
-        ip_range.start[2],
-        ip_range.start[3],
-        ip_range.end[0],
-        ip_range.end[1],
-        ip_range.end[2],
-        ip_range.end[3],
-    });
+    printScanHeader(io, &stdout_mutex, cidr, ip_range);
 
     var threads: std.ArrayList(Thread) = .empty;
     errdefer {
@@ -157,14 +175,9 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
 
     var sem: std.Io.Semaphore = .{ .permits = MAX_PING_THREADS };
 
-    // Skip the network and broadcast addresses: they are not hosts.
-    // (/31 and /32 have no such addresses, so only skip for prefix < 31.)
-    var first_ip = ip_range.start;
-    var last_ip = ip_range.end;
-    if (network.prefix_len < 31) {
-        utils.incrementIP(&first_ip);
-        utils.decrementIP(&last_ip);
-    }
+    const hosts = utils.usableHosts(network, ip_range);
+    const first_ip = hosts.start;
+    const last_ip = hosts.end;
 
     var current_ip = first_ip;
     while (true) {
@@ -239,46 +252,31 @@ pub fn pingHost(allocator: std.mem.Allocator, io: std.Io, stdout_mutex: *std.Io.
 }
 
 // ---------------------------------------------------------------------------
-// Experiment 2: TCP-connect discovery + ARP harvest.
-//
-// Faster alternative to one-ping-process-per-host, in two steps:
-//   1. TCP-connect to one common port per IP. A connect that succeeds OR is
-//      actively refused (RST) proves the host is up; only a timeout means
-//      "no answer". No subprocess per host, real concurrency.
-//   2. Afterwards, read the `arp -a` table. Every connect attempt (even a
-//      failed one) triggers ARP, and sleeping Apple devices often answer
-//      ARP while ignoring ping and TCP. Anything with a complete entry
-//      that step 1 missed gets printed as "(arp)".
+// Fast path: TCP-connect sweep plus ARP harvest. This is what `ns -s`
+// runs by default.
 // ---------------------------------------------------------------------------
 
 const TCP_PROBE_PORT = 80;
 const TCP_PROBE_TIMEOUT_MS = 500;
-const MAX_TCP_THREADS = 128;
 
-pub fn scanTcp(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
+/// Find live hosts in a subnet, fast and without root.
+///
+/// Two steps: probe one common TCP port per IP (a connect that succeeds
+/// or is actively refused proves the host is up; only a timeout means
+/// "no answer"), then read the `arp -a` table. Every probe attempt --
+/// even a failed one -- triggers ARP, and quiet devices that ignore TCP
+/// still answer ARP, so anything with a complete entry that step one
+/// missed is reported as "(arp)".
+pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
 
     var stdout_mutex: std.Io.Mutex = .init;
-    utils.printStdout(io, &stdout_mutex, "Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
-        cidr,
-        ip_range.start[0],
-        ip_range.start[1],
-        ip_range.start[2],
-        ip_range.start[3],
-        ip_range.end[0],
-        ip_range.end[1],
-        ip_range.end[2],
-        ip_range.end[3],
-    });
+    printScanHeader(io, &stdout_mutex, cidr, ip_range);
 
-    // Same skip rule as the ping sweep: no network/broadcast addresses.
-    var first_ip = ip_range.start;
-    var last_ip = ip_range.end;
-    if (network.prefix_len < 31) {
-        utils.incrementIP(&first_ip);
-        utils.decrementIP(&last_ip);
-    }
+    const hosts = utils.usableHosts(network, ip_range);
+    const first_ip = hosts.start;
+    const last_ip = hosts.end;
 
     var found: std.ArrayList([4]u8) = .empty;
     defer found.deinit(allocator);

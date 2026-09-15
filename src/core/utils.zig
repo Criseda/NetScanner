@@ -20,9 +20,9 @@ pub fn printUsage(io: std.Io) !void {
         \\
         \\Usage:
         \\
-        \\ns -p <ip> <port-range>    Scan a single IP address for open ports (example: 192.168.1.1 1-1024)
-        \\ns -s <subnet>             The subnet to scan for IPs in CIDR notation (example: 192.168.0.1/24)
-        \\ns -t <subnet>             Fast TCP-connect discovery + ARP harvest (experimental)
+        \\ns -p <ip> <port-range>    Scan one IP for open ports (example: 192.168.1.1 1-1024)
+        \\ns -s <subnet> [--ping]    Find live hosts in a subnet (example: 192.168.0.1/24)
+        \\                           Default is fast TCP + ARP discovery; --ping uses ICMP instead
         \\ns --help                  Display this help message
         \\ns --version               Display the version of NetScanner
     ;
@@ -207,6 +207,20 @@ pub fn decrementIP(ip: *[4]u8) void {
         ip[@intCast(i)] -%= 1;
         if (old != 0) break;
     }
+}
+
+/// First and last scannable host addresses of a range.
+///
+/// The network and broadcast addresses are not hosts, so they are left
+/// out. /31 and /32 ranges have no such addresses and pass through
+/// untouched.
+pub fn usableHosts(network: Network, range: IpRange) IpRange {
+    if (network.prefix_len >= 31) return range;
+    var first = range.start;
+    var last = range.end;
+    incrementIP(&first);
+    decrementIP(&last);
+    return .{ .start = first, .end = last };
 }
 
 pub fn ipToU32(ip: [4]u8) u32 {
