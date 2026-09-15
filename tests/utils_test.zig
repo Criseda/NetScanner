@@ -137,3 +137,16 @@ test "usableHosts skips network and broadcast addresses" {
     try std.testing.expectEqualSlices(u8, &tiny_range.start, &tiny_hosts.start);
     try std.testing.expectEqualSlices(u8, &tiny_range.end, &tiny_hosts.end);
 }
+
+test "collectIps expands a range inclusively" {
+    const allocator = std.testing.allocator;
+    var ips = try utils.collectIps(allocator, .{ 192, 168, 1, 1 }, .{ 192, 168, 1, 3 });
+    defer ips.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), ips.items.len);
+    try std.testing.expectEqualSlices(u8, &.{ 192, 168, 1, 1 }, &ips.items[0]);
+    try std.testing.expectEqualSlices(u8, &.{ 192, 168, 1, 3 }, &ips.items[2]);
+
+    var single = try utils.collectIps(allocator, .{ 10, 0, 0, 5 }, .{ 10, 0, 0, 5 });
+    defer single.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), single.items.len);
+}

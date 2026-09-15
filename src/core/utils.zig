@@ -173,6 +173,19 @@ pub fn decrementIP(ip: *[4]u8) void {
     }
 }
 
+/// Expand first..last into a list, inclusive on both ends.
+pub fn collectIps(allocator: std.mem.Allocator, first_ip: [4]u8, last_ip: [4]u8) !std.ArrayList([4]u8) {
+    var ips: std.ArrayList([4]u8) = .empty;
+    errdefer ips.deinit(allocator);
+    var ip = first_ip;
+    while (true) {
+        try ips.append(allocator, ip);
+        if (std.mem.eql(u8, &ip, &last_ip)) break;
+        incrementIP(&ip);
+    }
+    return ips;
+}
+
 /// First and last scannable host addresses of a range.
 ///
 /// The network and broadcast addresses are not hosts, so they are left
