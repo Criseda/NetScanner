@@ -218,15 +218,27 @@ pub fn ipInRange(ip: [4]u8, first: [4]u8, last: [4]u8) bool {
     return value >= ipToU32(first) and value <= ipToU32(last);
 }
 
-/// Parse one `arp -a` line into an IP address.
+/// Parse one neighbour-table line into an IP address.
 ///
-/// Understands macOS/Linux style:
-///   "? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]"
-/// Returns null for incomplete entries, multicast lines and anything
-/// unparseable (including the Windows format, for now).
+/// Understands two formats:
+///   `arp -a` (macOS/Linux): "? (192.168.1.1) at 10:e6:... on en0 ..."
+///   `ip neigh` (Linux):     "192.168.1.1 dev eth0 lladdr 10:e6:... REACHABLE"
+/// Returns null for dead entries (incomplete/FAILED), multicast lines
+/// and anything unparseable (including the Windows format, for now).
 pub fn parseArpLine(line: []const u8) ?[4]u8 {
-    if (std.mem.indexOf(u8, line, "incomplete") != null) return null;
-    const open = std.mem.indexOfScalar(u8, line, '(') orelse return null;
-    const close = std.mem.indexOfScalarPos(u8, line, open, ')') orelse return null;
-    return ipStringToBytes(line[open + 1 .. close]) catch null;
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len == 0) return null;
+    if (std.mem.indexOf(u8, trimmed, "incomplete") != null) return null;
+    if (std.mem.indexOf(u8, trimmed, "FAILED") != null) return null;
+    // `arp -a` puts the address in parentheses ...
+    if (std.mem.indexOfScalar(u8, trimmed, '(')) |open| {
+        const close = std.mem.indexOfScalarPos(u8, trimmed, open, ')') orelse return null;
+        return ipStringToBytes(trimmed[open + 1 .. close]) catch null;
+    }
+    // ... while `ip neigh` leads with it.
+    const end = std.mem.indexOfScalar(u8, trimmed, ' ') orelse trimmed.len;
+    const ip = ipStringToBytes(trimmed[0..end]) catch return null;
+    // Multicast and reserved ranges are never LAN hosts.
+    if (ip[0] >= 224) return null;
+    return ip;
 }
