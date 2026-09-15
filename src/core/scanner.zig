@@ -55,7 +55,11 @@ fn checkPortWrapper(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16
 
 fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !void {
     std.time.sleep(std.time.ns_per_ms * 5); // 10ms delay, adjust as needed
+
     const address = net.Address.initIp4(ip_address, port);
+
+    const stdout = std.io.getStdOut().writer();
+
     const stream = net.tcpConnectToAddress(address) catch |err| {
         switch (err) {
             error.ConnectionRefused => {
@@ -82,7 +86,7 @@ fn checkPort(ip_address: [4]u8, port: u16, open_ports: *std.ArrayList(u16)) !voi
     };
     defer stream.close();
 
-    std.debug.print("Open port: {}\n", .{port});
+    try stdout.print("Open port: {}\n", .{port});
     open_ports.append(port) catch |err| {
         std.debug.print("Error appending port {}: {}\n", .{ port, err });
     };
@@ -100,9 +104,18 @@ pub const NetworkScanResult = struct {
 pub fn scanNetwork(allocator: std.mem.Allocator, cidr: []const u8) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
-    std.debug.print("Scanning network range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d}\n", .{
-        ip_range.start[0], ip_range.start[1], ip_range.start[2], ip_range.start[3],
-        ip_range.end[0],   ip_range.end[1],   ip_range.end[2],   ip_range.end[3],
+    const stdout = std.io.getStdOut().writer();
+
+    try stdout.print("Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
+        cidr,
+        ip_range.start[0],
+        ip_range.start[1],
+        ip_range.start[2],
+        ip_range.start[3],
+        ip_range.end[0],
+        ip_range.end[1],
+        ip_range.end[2],
+        ip_range.end[3],
     });
 
     var threads = std.ArrayList(Thread).init(allocator);
@@ -140,6 +153,7 @@ fn scanIP(allocator: std.mem.Allocator, ip: [4]u8) !void {
 }
 
 pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
+    const stdout = std.io.getStdOut().writer();
     const ip_string = try utils.ipBytesToString(allocator, ip);
     defer allocator.free(ip_string);
 
@@ -151,6 +165,6 @@ pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) !void {
     defer allocator.free(ip_with_null);
 
     if (c_bindings.pingHost(ip_with_null.ptr)) {
-        std.debug.print("Host {s} is online\n", .{ip_string});
+        try stdout.print("Host {s} is online\n", .{ip_string});
     }
 }
