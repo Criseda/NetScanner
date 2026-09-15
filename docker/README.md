@@ -1,17 +1,16 @@
 # NetScanner Docker test lab
 
-Test NetScanner on other operating systems without owning them.
-Related issues: #24 (Windows run), #28 (Linux run).
+Test NetScanner on Linux without owning a Linux box. Related issue: #28.
+Windows and macOS can't be containerized (Windows containers need a
+Windows host, macOS containers don't exist), so those are tested on
+real hosts directly — see #24 for Windows.
 
 ## Support matrix
 
-| Environment | File | Status |
-|---|---|---|
-| linux/arm64 | `Dockerfile.linux` | Verified: build, 20/20 tests, discovery 4/4, port scans |
-| linux/amd64 | `Dockerfile.linux` (`--platform`) | Verified under Rosetta: build, 20/20 tests, discovery 4/4 |
-| windows/amd64 | `Dockerfile.windows` | UNTESTED template, needs a Windows host (see below) |
-| windows/arm64 | — | Omitted: no practical container base/toolchain story; see #24 |
-| macOS (any) | — | No such thing as macOS containers; test on a real Mac |
+| Environment | Status |
+|---|---|
+| linux/arm64 | Verified: build, 20/20 tests, discovery 4/4, port scans |
+| linux/amd64 | Verified under Rosetta: build, 20/20 tests, discovery 4/4 |
 
 ## Quick start (Linux lab)
 
@@ -55,11 +54,3 @@ docker run --rm --network nstest --cap-add=NET_RAW \
 
 `--cap-add=NET_RAW` is required: without it the `ping` binary the
 `--ping` path shells out to fails with "Operation not permitted".
-
-## Windows
-
-Windows containers run only on Windows hosts (Windows 10/11 Pro+ or
-Server with the Containers feature, Docker Desktop in
-Windows-containers mode) — so `Dockerfile.windows` is an untested
-starting point, not a verified setup. If you have such a host, the
-file header lists the four validation steps; report back on #24.
