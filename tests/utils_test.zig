@@ -100,7 +100,8 @@ test "ipInRange checks bounds inclusively" {
     try std.testing.expect(!utils.ipInRange([4]u8{ 192, 168, 2, 1 }, first, last));
 }
 
-test "parseArpLine reads macOS and Linux arp -a lines" {    const mac = utils.parseArpLine("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
+test "parseArpLine reads macOS and Linux arp -a lines" {
+    const mac = utils.parseArpLine("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
     try std.testing.expect(mac != null);
     try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &mac.?);
 
