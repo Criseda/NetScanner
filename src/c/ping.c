@@ -92,7 +92,9 @@ bool ping_host(const char *ip_address) {
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -120,14 +122,21 @@ unsigned short in_cksum(unsigned short *addr, int len) {
   return answer;
 }
 
+// Sequence numbers for outgoing echo requests. Every concurrent
+// ping_host call needs its own (id, sequence) pair: without it, one
+// thread reads another thread's reply and both report wrongly (#37).
+// pids are process-wide, so an atomic counter tells threads apart.
+static atomic_uint ping_seq = 1;
+
 // Simplified Linux ping implementation using raw sockets
 bool ping_host(const char *ip_address) {
   // For testing non-root access, fall back to system ping.
   // -W is in seconds on Linux (see WARNING above): /1000 keeps the
-  // same ~1s wait as macOS.
+  // same ~1s wait as macOS. -c 2 because a single echo is sometimes
+  // lost under parallel bursts (see #37); the second packet decides.
   if (geteuid() != 0) {
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ping -c 1 -W %d -q %s > /dev/null 2>&1",
+    snprintf(cmd, sizeof(cmd), "ping -c 2 -W %d -q %s > /dev/null 2>&1",
              PING_TIMEOUT_MS / 1000, ip_address);
     return system(cmd) == 0;
   }
@@ -155,11 +164,15 @@ bool ping_host(const char *ip_address) {
   char packet[packet_size];
   struct icmphdr *icmp_header = (struct icmphdr *)packet;
 
-  // Set up ICMP header
+  // Set up ICMP header. The sequence number is unique per call so
+  // concurrent pings can tell their replies apart (see above).
+  const unsigned short echo_id = (unsigned short)(getpid() & 0xFFFF);
+  const unsigned short echo_seq =
+      (unsigned short)atomic_fetch_add(&ping_seq, 1);
   icmp_header->type = ICMP_ECHO;
   icmp_header->code = 0;
-  icmp_header->un.echo.id = getpid() & 0xFFFF;
-  icmp_header->un.echo.sequence = 1;
+  icmp_header->un.echo.id = echo_id;
+  icmp_header->un.echo.sequence = echo_seq;
 
   // Copy payload after the ICMP header
   memcpy(packet + sizeof(struct icmphdr), send_data, sizeof(send_data));
@@ -173,15 +186,37 @@ bool ping_host(const char *ip_address) {
     return false;
   }
 
-  // Wait for response
-  char reply[1024];
-  struct sockaddr_in from;
-  socklen_t fromlen = sizeof(from);
-  int received = recvfrom(sock, reply, sizeof(reply), 0,
-                          (struct sockaddr *)&from, &fromlen);
-  close(sock);
-
-  // Simple check: did we get any reply from the target?
-  return (received > 0 && from.sin_addr.s_addr == addr.sin_addr.s_addr);
+  // Wait for OUR response. Other traffic (including other threads'
+  // echo replies) arrives on the same socket, so keep reading until
+  // the matching reply shows up or the receive timeout hits.
+  while (true) {
+    char reply[1024];
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+    int received = recvfrom(sock, reply, sizeof(reply), 0,
+                            (struct sockaddr *)&from, &fromlen);
+    if (received <= 0) {
+      close(sock);
+      return false;
+    }
+    if (from.sin_addr.s_addr != addr.sin_addr.s_addr) {
+      continue;
+    }
+    // Replies arrive with their IP header attached; skip it to find
+    // the ICMP header (header length varies with IP options).
+    const struct iphdr *ip_header = (const struct iphdr *)reply;
+    const size_t ip_header_len = (size_t)ip_header->ihl * 4;
+    if ((size_t)received < ip_header_len + sizeof(struct icmphdr)) {
+      continue;
+    }
+    const struct icmphdr *reply_header =
+        (const struct icmphdr *)(reply + ip_header_len);
+    if (reply_header->type == ICMP_ECHOREPLY &&
+        reply_header->un.echo.id == echo_id &&
+        reply_header->un.echo.sequence == echo_seq) {
+      close(sock);
+      return true;
+    }
+  }
 }
 #endif
