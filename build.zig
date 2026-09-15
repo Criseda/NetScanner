@@ -4,63 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create a module for the core functionality
-    const core_module = b.createModule(.{
-        .root_source_file = b.path("src/core/core.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Set up include directories
-    const include_dirs = &[_][]const u8{
-        "src/c",
-        ".", // Add project root as well
-    };
-
-    // Create module for C bindings
-    const bindings_module = b.createModule(.{
-        .root_source_file = b.path("src/c/c_bindings.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Add dependencies after creating the module
-    bindings_module.addImport("core", core_module);
-
-    // Main executable
-    const exe_module = b.createModule(.{
-        .root_source_file = b.path("src/core/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "core", .module = core_module },
-            .{ .name = "bindings", .module = bindings_module },
-        },
-    });
-    const exe = b.addExecutable(.{
-        .name = "ns",
-        .root_module = exe_module,
-    });
-
-    exe_module.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
-    // Add ALL include paths
-    for (include_dirs) |dir| {
-        exe_module.addIncludePath(b.path(dir));
-    }
-
-    // Link required system libraries
-    switch (target.result.os.tag) {
-        .windows => {
-            exe_module.linkSystemLibrary("iphlpapi", .{});
-            exe_module.linkSystemLibrary("ws2_32", .{});
-        },
-        else => {},
-    }
-
+    const exe = buildExe(b, target, optimize);
     b.installArtifact(exe);
 
-    // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
@@ -69,164 +15,105 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the network scanner");
     run_step.dependOn(&run_cmd.step);
 
-    // Tests
+    const libs = buildLibraries(b, target, optimize);
     const test_module = b.createModule(.{
         .root_source_file = b.path("tests/main_test.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "core", .module = core_module },
-            .{ .name = "bindings", .module = bindings_module },
+            .{ .name = "core", .module = libs.core },
+            .{ .name = "bindings", .module = libs.bindings },
         },
     });
-    const main_tests = b.addTest(.{
-        .root_module = test_module,
-    });
-
-    test_module.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
-    // Add ALL include paths to test
-    for (include_dirs) |dir| {
-        test_module.addIncludePath(b.path(dir));
-    }
-
-    // Link libraries for tests
-    switch (target.result.os.tag) {
-        .windows => {
-            test_module.linkSystemLibrary("iphlpapi", .{});
-            test_module.linkSystemLibrary("ws2_32", .{});
-        },
-        else => {},
-    }
+    linkNativeDeps(b, test_module, target);
+    const main_tests = b.addTest(.{ .root_module = test_module });
 
     const run_tests = b.addRunArtifact(main_tests);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_tests.step);
 
-    // Release step
     const release_step = b.step("release", "Build releases for all target platforms");
-
-    // Define all targets
-    // Define all targets with proper ABI settings
-    const targets = [_]std.Target.Query{
-        // Windows (x86_64)
-        .{
-            .cpu_arch = .x86_64,
-            .os_tag = .windows,
-        },
-        // macOS (x86_64)
-        .{
-            .cpu_arch = .x86_64,
-            .os_tag = .macos,
-            .abi = .none,
-        },
-        // macOS (ARM64/M1)
-        .{
-            .cpu_arch = .aarch64,
-            .os_tag = .macos,
-            .abi = .none,
-        },
-        // Linux (x86_64)
-        .{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .gnu,
-        },
-        // Linux (ARM64)
-        .{
-            .cpu_arch = .aarch64,
-            .os_tag = .linux,
-            .abi = .gnu,
-        },
-    };
-
-    // Build for each target
-    for (targets) |t| {
-        const release_exe = createExecutable(b, t, optimize);
-
-        // Create the destination directory path directly in the switch statement
-        const dest_dir = switch (t.os_tag.?) {
-            .windows => "releases/windows",
-            .macos => switch (t.cpu_arch.?) {
-                .x86_64 => "releases/macos-x86_64",
-                .aarch64 => "releases/macos-arm64",
-                else => unreachable,
-            },
-            .linux => switch (t.cpu_arch.?) {
-                .x86_64 => "releases/linux-x86_64",
-                .aarch64 => "releases/linux-arm64",
-                .arm => "releases/linux-arm32",
-                else => unreachable,
-            },
-            else => unreachable,
-        };
-
+    for (releaseTargets()) |t| {
+        const release_exe = buildExe(b, b.resolveTargetQuery(t.query), optimize);
         const install_release = b.addInstallArtifact(release_exe, .{
-            .dest_dir = .{ .override = .{ .custom = dest_dir } },
+            .dest_dir = .{ .override = .{ .custom = t.dest_dir } },
         });
-
         release_step.dependOn(&install_release.step);
     }
 }
 
-fn createExecutable(b: *std.Build, target_cross: std.Target.Query, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-    // Convert CrossTarget to ResolvedTarget
-    const resolved_target = b.resolveTargetQuery(target_cross);
+const Libraries = struct {
+    core: *std.Build.Module,
+    bindings: *std.Build.Module,
+};
 
-    // Create a module for the core functionality
+/// The Zig half of NetScanner: core logic plus the C ping bindings.
+/// Every binary (main, tests, each release) gets its own copy per target.
+fn buildLibraries(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) Libraries {
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/core.zig"),
-        .target = resolved_target,
+        .target = target,
         .optimize = optimize,
     });
-
-    // Set up include directories
-    const include_dirs = &[_][]const u8{
-        "src/c",
-        ".", // Add project root as well
-    };
-
-    // Create module for C bindings
     const bindings_module = b.createModule(.{
         .root_source_file = b.path("src/c/c_bindings.zig"),
-        .target = resolved_target,
+        .target = target,
         .optimize = optimize,
     });
-
-    // Add dependencies after creating the module
     bindings_module.addImport("core", core_module);
+    return .{ .core = core_module, .bindings = bindings_module };
+}
 
-    // Create the executable
+/// Build the `ns` executable for one target.
+fn buildExe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const libs = buildLibraries(b, target, optimize);
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/core/main.zig"),
-        .target = resolved_target,
+        .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "core", .module = core_module },
-            .{ .name = "bindings", .module = bindings_module },
+            .{ .name = "core", .module = libs.core },
+            .{ .name = "bindings", .module = libs.bindings },
         },
     });
-    const exe = b.addExecutable(.{
-        .name = "ns",
-        .root_module = exe_module,
-    });
+    linkNativeDeps(b, exe_module, target);
+    return b.addExecutable(.{ .name = "ns", .root_module = exe_module });
+}
 
-    exe_module.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
-
-    // Add include paths
-    for (include_dirs) |dir| {
-        exe_module.addIncludePath(b.path(dir));
+/// Everything compiled here also compiles ping.c and, on Windows, links
+/// the system libraries ICMP needs.
+fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    mod.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
+    mod.addIncludePath(b.path("src/c"));
+    mod.addIncludePath(b.path("."));
+    if (target.result.os.tag == .windows) {
+        mod.linkSystemLibrary("iphlpapi", .{});
+        mod.linkSystemLibrary("ws2_32", .{});
     }
+}
 
-    // Link required system libraries
-    switch (target_cross.os_tag.?) {
-        .windows => {
-            exe_module.linkSystemLibrary("iphlpapi", .{});
-            exe_module.linkSystemLibrary("ws2_32", .{});
-        },
-        else => {},
-    }
+const ReleaseTarget = struct {
+    query: std.Target.Query,
+    dest_dir: []const u8,
+};
 
-    return exe;
+/// The five platforms `zig build release` produces.
+fn releaseTargets() [5]ReleaseTarget {
+    return .{
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .windows }, .dest_dir = "releases/windows" },
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .macos, .abi = .none }, .dest_dir = "releases/macos-x86_64" },
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .macos, .abi = .none }, .dest_dir = "releases/macos-arm64" },
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }, .dest_dir = "releases/linux-x86_64" },
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }, .dest_dir = "releases/linux-arm64" },
+    };
 }

@@ -34,6 +34,15 @@ test "splitStringToIntArray handles port range correctly" {
     try std.testing.expectEqual(@as(u16, 1024), result[1]);
 }
 
+test "splitStringToIntArray rejects bad ranges" {
+    const allocator = std.testing.allocator;
+    const bad = [_][]const u8{ "", "-1024", "1024-", "1--1024", "0-1024", "1-65536", "abc", "1-x" };
+    for (bad) |input| {
+        const result = utils.splitStringToIntArray(allocator, input, '-');
+        try std.testing.expectError(error.InvalidPortRange, result);
+    }
+}
+
 test "parseCidr handles valid CIDR" {
     const network = try utils.parseCidr("192.168.1.0/24");
 

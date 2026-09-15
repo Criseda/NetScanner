@@ -76,6 +76,7 @@ pub fn scanPorts(
             t.join();
             sem.post(io);
         };
+        // Ports are u16: stop explicitly at the top instead of wrapping to 0.
         if (port == end_port or port == 65535) break;
         port += 1;
     }
@@ -113,21 +114,12 @@ fn checkPort(ctx: PortScanCtx) !void {
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = ctx.ip, .port = ctx.port } };
 
     var stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
-        switch (err) {
-            error.ConnectionRefused => return, // Expected for closed ports; stay quiet.
-            error.AccessDenied => {
-                std.debug.print("Access denied for port {}\n", .{ctx.port});
-                return;
-            },
-            error.Timeout => {
-                std.debug.print("Connection timed out for port {}\n", .{ctx.port});
-                return;
-            },
-            else => {
-                std.debug.print("Error connecting to port {}: {}\n", .{ ctx.port, err });
-                return;
-            },
+        // A refused connection just means "closed". Anything else is
+        // unexpected on a LAN and worth one stderr line.
+        if (err != error.ConnectionRefused) {
+            std.debug.print("Port {d}: {}\n", .{ ctx.port, err });
         }
+        return;
     };
     defer stream.close(io);
 
@@ -140,8 +132,79 @@ fn checkPort(ctx: PortScanCtx) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Host discovery.
+// Host discovery: one worker thread per IP, capped by a semaphore.
+// Both sweeps (fast TCP and fallback ping) share this machinery and only
+// differ in their worker function.
 // ---------------------------------------------------------------------------
+
+/// State shared by every worker of a discovery sweep. It lives on the
+/// caller's stack and holds nothing but pointers plus plain values, so
+/// passing it to threads by value is safe. All threads are joined
+/// before the sweep returns.
+const Discovery = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stdout_mutex: *std.Io.Mutex,
+    found: *std.ArrayList([4]u8),
+    found_mutex: *std.Io.Mutex,
+    sem: *std.Io.Semaphore,
+
+    /// Record a host as found and print it. The suffix tags how it was
+    /// found, e.g. " (arp)" for ARP-harvested hosts, "" otherwise.
+    fn reportHost(self: Discovery, ip: [4]u8, comptime suffix: []const u8) void {
+        self.found_mutex.lockUncancelable(self.io);
+        defer self.found_mutex.unlock(self.io);
+        self.found.append(self.allocator, ip) catch return;
+        utils.printStdout(self.io, self.stdout_mutex, "Host {d}.{d}.{d}.{d} is online" ++ suffix ++ "\n", .{
+            ip[0], ip[1], ip[2], ip[3],
+        });
+    }
+
+    fn isFound(self: Discovery, ip: [4]u8) bool {
+        self.found_mutex.lockUncancelable(self.io);
+        defer self.found_mutex.unlock(self.io);
+        for (self.found.items) |known| {
+            if (std.mem.eql(u8, &known, &ip)) return true;
+        }
+        return false;
+    }
+};
+
+/// Run `worker` once per IP from first to last, capped by the semaphore
+/// in shares, and wait for every thread before returning.
+fn sweepHosts(
+    allocator: std.mem.Allocator,
+    shares: Discovery,
+    first_ip: [4]u8,
+    last_ip: [4]u8,
+    comptime worker: fn (Discovery, [4]u8) void,
+) void {
+    var threads: std.ArrayList(Thread) = .empty;
+    defer {
+        for (threads.items) |t| t.join();
+        threads.deinit(allocator);
+    }
+
+    var current_ip = first_ip;
+    while (true) {
+        const last = std.mem.eql(u8, &current_ip, &last_ip);
+        shares.sem.waitUncancelable(shares.io);
+        const handle = Thread.spawn(.{}, worker, .{ shares, current_ip }) catch |err| {
+            std.debug.print("SpawnError: {}\n", .{err});
+            shares.sem.post(shares.io);
+            if (last) break;
+            utils.incrementIP(&current_ip);
+            continue;
+        };
+        threads.append(allocator, handle) catch |err| {
+            std.debug.print("Error tracking thread: {}\n", .{err});
+            handle.join();
+            shares.sem.post(shares.io);
+        };
+        if (last) break;
+        utils.incrementIP(&current_ip);
+    }
+}
 
 /// Print the one-line header every network scan starts with.
 fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, range: utils.IpRange) void {
@@ -167,88 +230,39 @@ pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u
     var stdout_mutex: std.Io.Mutex = .init;
     printScanHeader(io, &stdout_mutex, cidr, ip_range);
 
-    var threads: std.ArrayList(Thread) = .empty;
-    errdefer {
-        for (threads.items) |t| t.join();
-        threads.deinit(allocator);
-    }
-
     var sem: std.Io.Semaphore = .{ .permits = MAX_PING_THREADS };
+    var found: std.ArrayList([4]u8) = .empty;
+    defer found.deinit(allocator);
+    var found_mutex: std.Io.Mutex = .init;
+    const shares = Discovery{
+        .io = io,
+        .allocator = allocator,
+        .stdout_mutex = &stdout_mutex,
+        .found = &found,
+        .found_mutex = &found_mutex,
+        .sem = &sem,
+    };
 
     const hosts = utils.usableHosts(network, ip_range);
-    const first_ip = hosts.start;
-    const last_ip = hosts.end;
-
-    var current_ip = first_ip;
-    while (true) {
-        sem.waitUncancelable(io);
-        const ctx = PingScanCtx{
-            .io = io,
-            .ip = current_ip,
-            .allocator = allocator,
-            .stdout_mutex = &stdout_mutex,
-            .sem = &sem,
-        };
-        const handle = Thread.spawn(.{}, scanIPWorker, .{ctx}) catch |err| {
-            std.debug.print("SpawnError: {}\n", .{err});
-            sem.post(io);
-            if (std.mem.eql(u8, &current_ip, &last_ip)) break;
-            utils.incrementIP(&current_ip);
-            continue;
-        };
-        threads.append(allocator, handle) catch |err| {
-            std.debug.print("Error tracking thread: {}\n", .{err});
-            handle.join();
-            sem.post(io);
-        };
-        if (std.mem.eql(u8, &current_ip, &last_ip)) break;
-        utils.incrementIP(&current_ip);
-    }
-
-    // Join all spawned threads.
-    for (threads.items) |handle| {
-        handle.join();
-    }
-    threads.deinit(allocator);
+    sweepHosts(allocator, shares, hosts.start, hosts.end, pingWorker);
 }
 
-const PingScanCtx = struct {
-    io: std.Io,
-    ip: [4]u8,
-    allocator: std.mem.Allocator,
-    stdout_mutex: *std.Io.Mutex,
-    sem: *std.Io.Semaphore,
-};
-
-fn scanIPWorker(ctx: PingScanCtx) void {
-    defer ctx.sem.post(ctx.io);
-    scanIP(ctx) catch |err| {
-        std.debug.print("Error scanning host: {}\n", .{err});
-    };
+fn pingWorker(shares: Discovery, ip: [4]u8) void {
+    defer shares.sem.post(shares.io);
+    if (pingHost(shares.allocator, ip)) shares.reportHost(ip, "");
 }
 
-fn scanIP(ctx: PingScanCtx) !void {
-    // Check if the IP is online using ICMP ping
-    pingHost(ctx.allocator, ctx.io, ctx.stdout_mutex, ctx.ip) catch |err| {
-        std.debug.print("Error pinging host: {}\n", .{err});
-        return;
-    };
-}
-
-pub fn pingHost(allocator: std.mem.Allocator, io: std.Io, stdout_mutex: *std.Io.Mutex, ip: [4]u8) !void {
-    const ip_string = try utils.ipBytesToString(allocator, ip);
+/// Ping one host through the C helper. Returns true when it answers.
+/// Anything the ping cannot even attempt (bad address, no memory)
+/// counts as unanswered rather than as an error.
+pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) bool {
+    const ip_string = utils.ipBytesToString(allocator, ip) catch return false;
     defer allocator.free(ip_string);
 
-    if (!std.unicode.utf8ValidateSlice(ip_string)) {
-        return error.InvalidWtf8;
-    }
-
-    const ip_with_null = try allocator.dupeZ(u8, ip_string);
+    const ip_with_null = allocator.dupeZ(u8, ip_string) catch return false;
     defer allocator.free(ip_with_null);
 
-    if (c_bindings.pingHost(ip_with_null.ptr)) {
-        utils.printStdout(io, stdout_mutex, "Host {s} is online\n", .{ip_string});
-    }
+    return c_bindings.pingHost(ip_with_null.ptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -275,78 +289,27 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
     printScanHeader(io, &stdout_mutex, cidr, ip_range);
 
     const hosts = utils.usableHosts(network, ip_range);
-    const first_ip = hosts.start;
-    const last_ip = hosts.end;
 
+    var sem: std.Io.Semaphore = .{ .permits = MAX_TCP_THREADS };
     var found: std.ArrayList([4]u8) = .empty;
     defer found.deinit(allocator);
     var found_mutex: std.Io.Mutex = .init;
+    const shares = Discovery{
+        .io = io,
+        .allocator = allocator,
+        .stdout_mutex = &stdout_mutex,
+        .found = &found,
+        .found_mutex = &found_mutex,
+        .sem = &sem,
+    };
+    sweepHosts(allocator, shares, hosts.start, hosts.end, tcpWorker);
 
-    var threads: std.ArrayList(Thread) = .empty;
-    errdefer {
-        for (threads.items) |t| t.join();
-        threads.deinit(allocator);
-    }
-
-    var sem: std.Io.Semaphore = .{ .permits = MAX_TCP_THREADS };
-
-    var current_ip = first_ip;
-    while (true) {
-        sem.waitUncancelable(io);
-        const ctx = TcpScanCtx{
-            .io = io,
-            .ip = current_ip,
-            .allocator = allocator,
-            .found = &found,
-            .found_mutex = &found_mutex,
-            .stdout_mutex = &stdout_mutex,
-            .sem = &sem,
-        };
-        const handle = Thread.spawn(.{}, tcpProbeWorker, .{ctx}) catch |err| {
-            std.debug.print("SpawnError: {}\n", .{err});
-            sem.post(io);
-            if (std.mem.eql(u8, &current_ip, &last_ip)) break;
-            utils.incrementIP(&current_ip);
-            continue;
-        };
-        threads.append(allocator, handle) catch |err| {
-            std.debug.print("Error tracking thread: {}\n", .{err});
-            handle.join();
-            sem.post(io);
-        };
-        if (std.mem.eql(u8, &current_ip, &last_ip)) break;
-        utils.incrementIP(&current_ip);
-    }
-
-    for (threads.items) |handle| {
-        handle.join();
-    }
-    threads.deinit(allocator);
-
-    harvestArp(allocator, io, &stdout_mutex, first_ip, last_ip, &found, &found_mutex);
+    harvestArp(shares, hosts.start, hosts.end);
 }
 
-const TcpScanCtx = struct {
-    io: std.Io,
-    ip: [4]u8,
-    allocator: std.mem.Allocator,
-    found: *std.ArrayList([4]u8),
-    found_mutex: *std.Io.Mutex,
-    stdout_mutex: *std.Io.Mutex,
-    sem: *std.Io.Semaphore,
-};
-
-fn tcpProbeWorker(ctx: TcpScanCtx) void {
-    defer ctx.sem.post(ctx.io);
-    if (!tcpProbe(ctx.io, ctx.ip)) return;
-
-    ctx.found_mutex.lockUncancelable(ctx.io);
-    defer ctx.found_mutex.unlock(ctx.io);
-    ctx.found.append(ctx.allocator, ctx.ip) catch return;
-
-    utils.printStdout(ctx.io, ctx.stdout_mutex, "Host {d}.{d}.{d}.{d} is online\n", .{
-        ctx.ip[0], ctx.ip[1], ctx.ip[2], ctx.ip[3],
-    });
+fn tcpWorker(shares: Discovery, ip: [4]u8) void {
+    defer shares.sem.post(shares.io);
+    if (tcpProbe(shares.io, ip)) shares.reportHost(ip, "");
 }
 
 /// Returns true when the host answers a TCP connect (open port) or
@@ -422,41 +385,18 @@ fn tcpProbeTimeout(ip: [4]u8) bool {
 /// Read the local ARP table and report in-range hosts the TCP sweep
 /// missed. Needs no privileges; `arp -a` exists on macOS, Linux and
 /// Windows (only the first two formats are parsed for now).
-fn harvestArp(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout_mutex: *std.Io.Mutex,
-    first_ip: [4]u8,
-    last_ip: [4]u8,
-    found: *std.ArrayList([4]u8),
-    found_mutex: *std.Io.Mutex,
-) void {
-    const result = std.process.run(allocator, io, .{ .argv = &.{ "arp", "-a" } }) catch |err| {
+fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
+    const result = std.process.run(shares.allocator, shares.io, .{ .argv = &.{ "arp", "-a" } }) catch |err| {
         std.debug.print("arp harvest skipped: {}\n", .{err});
         return;
     };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    defer shares.allocator.free(result.stdout);
+    defer shares.allocator.free(result.stderr);
 
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     while (lines.next()) |line| {
         const ip = utils.parseArpLine(line) orelse continue;
         if (!utils.ipInRange(ip, first_ip, last_ip)) continue;
-
-        found_mutex.lockUncancelable(io);
-        var seen = false;
-        for (found.items) |known| {
-            if (std.mem.eql(u8, &known, &ip)) {
-                seen = true;
-                break;
-            }
-        }
-        found_mutex.unlock(io);
-
-        if (!seen) {
-            utils.printStdout(io, stdout_mutex, "Host {d}.{d}.{d}.{d} is online (arp)\n", .{
-                ip[0], ip[1], ip[2], ip[3],
-            });
-        }
+        if (!shares.isFound(ip)) shares.reportHost(ip, " (arp)");
     }
 }

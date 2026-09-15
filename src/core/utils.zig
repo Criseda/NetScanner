@@ -63,9 +63,6 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
             if (byte_index >= 4) {
                 return error.InvalidIpAddress;
             }
-            if (byte > 255) {
-                return error.InvalidIpAddress;
-            }
             ip_bytes[byte_index] = byte;
             byte = 0;
             byte_index += 1;
@@ -74,9 +71,8 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
         if (char < '0' or char > '9') {
             return error.InvalidIpAddress;
         }
-        // Convert the character to a digit
         const digit = char - '0';
-        // Check for overflow
+        // Reject octets above 255 without overflowing the u8.
         if (byte > (255 - digit) / 10) {
             return error.InvalidIpAddress;
         }
@@ -94,53 +90,40 @@ pub fn ipBytesToString(allocator: std.mem.Allocator, ip: [4]u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
 }
 
+/// Split "1-1024" on the delimiter into port numbers.
+/// Rejects non-digits, zeros and values above 65535.
 pub fn splitStringToIntArray(allocator: std.mem.Allocator, string: []const u8, delimiter: u8) !([]u16) {
-    // Initial allocation with a size of 2
-    var array: []u16 = try allocator.alloc(u16, 1);
-    errdefer allocator.free(array);
-    var array_index: usize = 0;
-    var number: u16 = 0;
-    var string_index: usize = 0;
+    var array: std.ArrayList(u16) = .empty;
+    errdefer array.deinit(allocator);
 
-    while (string_index < string.len) : (string_index += 1) {
-        const char = string[string_index];
+    var number: u16 = 0;
+    var has_digits = false;
+
+    for (string) |char| {
         if (char == delimiter) {
-            if (array_index >= array.len) {
-                // Use realloc to increase the size of the array
-                const new_array = try allocator.realloc(array, array.len * 2);
-                array = new_array;
-            }
-            array[array_index] = number;
+            if (!has_digits) return error.InvalidPortRange;
+            try array.append(allocator, number);
             number = 0;
-            array_index += 1;
+            has_digits = false;
             continue;
         }
-        // Port specific checks (TODO: Refactor this into a separate function)
         if (char < '0' or char > '9') {
             return error.InvalidPortRange;
         }
-        // Convert the character to a digit
         const digit: u16 = char - '0';
-        // Check for overflow
         if (number > (65535 - digit) / 10) {
             return error.InvalidPortRange;
         }
         number = number * 10 + digit;
-
-        // Throw an error if the number is zero or less
-        if (number <= 0) {
+        if (number == 0) {
             return error.InvalidPortRange;
         }
+        has_digits = true;
     }
 
-    // Handle the last number after the loop
-    if (array_index >= array.len) {
-        const new_array = try allocator.realloc(array, array.len + 1);
-        array = new_array;
-    }
-    array[array_index] = number;
-
-    return array[0 .. array_index + 1];
+    if (!has_digits) return error.InvalidPortRange;
+    try array.append(allocator, number);
+    return array.toOwnedSlice(allocator);
 }
 
 pub fn parseCidr(cidr: []const u8) !Network {
@@ -160,28 +143,9 @@ pub fn parseCidr(cidr: []const u8) !Network {
 
 pub fn getIpRange(network: Network) !IpRange {
     const mask: u32 = computeMask(network.prefix_len);
-    const start_ip = (@as(u32, network.address[0]) << 24) | (@as(u32, network.address[1]) << 16) | (@as(u32, network.address[2]) << 8) | network.address[3];
-    const network_start = start_ip & mask;
-    const network_end = network_start | ~mask;
-
-    const start_ip_bytes = [4]u8{
-        @truncate((network_start >> 24) & 0xFF),
-        @truncate((network_start >> 16) & 0xFF),
-        @truncate((network_start >> 8) & 0xFF),
-        @truncate(network_start & 0xFF),
-    };
-
-    const end_ip_bytes = [4]u8{
-        @truncate((network_end >> 24) & 0xFF),
-        @truncate((network_end >> 16) & 0xFF),
-        @truncate((network_end >> 8) & 0xFF),
-        @truncate(network_end & 0xFF),
-    };
-
-    return IpRange{
-        .start = start_ip_bytes,
-        .end = end_ip_bytes,
-    };
+    const start_ip = ipToU32(network.address) & mask;
+    const end_ip = start_ip | ~mask;
+    return .{ .start = u32ToIp(start_ip), .end = u32ToIp(end_ip) };
 }
 
 fn computeMask(prefix_len: u8) u32 {
@@ -225,6 +189,15 @@ pub fn usableHosts(network: Network, range: IpRange) IpRange {
 
 pub fn ipToU32(ip: [4]u8) u32 {
     return (@as(u32, ip[0]) << 24) | (@as(u32, ip[1]) << 16) | (@as(u32, ip[2]) << 8) | ip[3];
+}
+
+pub fn u32ToIp(value: u32) [4]u8 {
+    return .{
+        @truncate((value >> 24) & 0xFF),
+        @truncate((value >> 16) & 0xFF),
+        @truncate((value >> 8) & 0xFF),
+        @truncate(value & 0xFF),
+    };
 }
 
 pub fn ipInRange(ip: [4]u8, first: [4]u8, last: [4]u8) bool {
