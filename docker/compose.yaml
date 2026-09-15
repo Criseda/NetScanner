@@ -1,0 +1,43 @@
+# One-command virtual LAN for NetScanner validation.
+# See docker/README.md. Brings up two neighbours (a quiet box and a
+# port-80 box) plus the scanner image; the gateway (.1) comes free.
+name: netscanner-lab
+
+services:
+  # Interactive shell with the repo mounted: run zig build, tests, scans.
+  scanner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.linux
+    image: netscanner-test
+    networks:
+      lantest:
+    # Without this the ping binary the --ping path shells out to fails
+    # with "Operation not permitted".
+    cap_add:
+      - NET_RAW
+    volumes:
+      - ..:/work
+    working_dir: /work
+    stdin_open: true
+    tty: true
+
+  # Quiet neighbour: answers ping and ARP, drops TCP.
+  n1:
+    image: busybox
+    command: ["sleep", "3600"]
+    networks:
+      lantest:
+
+  # Loud neighbour: port 80 open.
+  web:
+    image: busybox
+    command: ["httpd", "-f", "-p", "80"]
+    networks:
+      lantest:
+
+networks:
+  lantest:
+    ipam:
+      config:
+        - subnet: 192.168.90.0/24
