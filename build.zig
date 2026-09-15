@@ -107,12 +107,14 @@ const ReleaseTarget = struct {
     dest_dir: []const u8,
 };
 
-/// The five platforms `zig build release` produces.
+/// The five platforms `zig build release` produces. Abi is left as
+/// the default everywhere except Linux, where the docs use explicit
+/// gnu; macOS especially must not pin one.
 fn releaseTargets() [5]ReleaseTarget {
     return .{
         .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .windows }, .dest_dir = "releases/windows" },
-        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .macos, .abi = .none }, .dest_dir = "releases/macos-x86_64" },
-        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .macos, .abi = .none }, .dest_dir = "releases/macos-arm64" },
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .macos }, .dest_dir = "releases/macos-x86_64" },
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .macos }, .dest_dir = "releases/macos-arm64" },
         .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }, .dest_dir = "releases/linux-x86_64" },
         .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }, .dest_dir = "releases/linux-arm64" },
     };

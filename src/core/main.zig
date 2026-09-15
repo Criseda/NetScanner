@@ -85,8 +85,8 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]con
     const cidr = args[2];
     const use_ping = args.len > 3 and std.mem.eql(u8, args[3], "--ping");
     if (use_ping) {
-        _ = try scanner.scanNetworkPing(allocator, io, cidr);
+        try scanner.scanNetworkPing(allocator, io, cidr);
     } else {
-        _ = try scanner.scanNetwork(allocator, io, cidr);
+        try scanner.scanNetwork(allocator, io, cidr);
     }
 }
