@@ -427,15 +427,30 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     sweepHosts(shares.allocator, shares, candidates.items, verifyWorker);
 }
 
-/// Dump `arp -a`. Returns the output for the caller to free, or null
-/// when arp is missing -- then discovery just ends after the TCP sweep.
+/// Dump the neighbour table. Prefers `arp -a`, falls back to
+/// `ip neigh show` (minimal Linux distros often lack net-tools).
+/// Returns the output for the caller to free, or null when neither
+/// tool exists -- then discovery just ends after the TCP sweep.
 fn readArpTable(shares: Discovery) ?[]u8 {
-    const result = std.process.run(shares.allocator, shares.io, .{ .argv = &.{ "arp", "-a" } }) catch |err| {
-        std.debug.print("arp harvest skipped: {}\n", .{err});
-        return null;
+    const commands = [_][]const []const u8{
+        &.{ "arp", "-a" },
+        &.{ "ip", "neigh", "show" },
     };
-    shares.allocator.free(result.stderr);
-    return result.stdout;
+    for (commands) |argv| {
+        const result = std.process.run(shares.allocator, shares.io, .{ .argv = argv }) catch |err| {
+            // Missing tool: try the next one. Anything else is a real
+            // failure, so stop instead of running stranger commands.
+            if (err != error.FileNotFound) {
+                std.debug.print("arp harvest skipped: {}\n", .{err});
+                return null;
+            }
+            continue;
+        };
+        shares.allocator.free(result.stderr);
+        return result.stdout;
+    }
+    std.debug.print("arp harvest skipped: neither `arp` nor `ip` found\n", .{});
+    return null;
 }
 
 fn verifyWorker(shares: Discovery, ip: [4]u8) void {

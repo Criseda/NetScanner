@@ -118,6 +118,13 @@ test "parseArpLine reads macOS and Linux arp -a lines" {
     try std.testing.expect(linux != null);
     try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 20 }, &linux.?);
 
+    // `ip neigh show` format, including dead and multicast lines.
+    const neigh = utils.parseArpLine("192.168.1.20 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE");
+    try std.testing.expect(neigh != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 20 }, &neigh.?);
+    try std.testing.expect(utils.parseArpLine("192.168.1.22 dev eth0  FAILED") == null);
+    try std.testing.expect(utils.parseArpLine("224.0.0.251 dev eth0 lladdr 01:00:5e:00:00:fb REACHABLE") == null);
+
     // Incomplete entries and garbage yield null.
     try std.testing.expect(utils.parseArpLine("? (192.168.1.22) at (incomplete) on en0 ifscope [ethernet]") == null);
     try std.testing.expect(utils.parseArpLine("not an arp line") == null);
