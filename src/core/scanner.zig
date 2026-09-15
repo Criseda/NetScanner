@@ -18,6 +18,95 @@ const MAX_PORT_THREADS = 100;
 const MAX_PING_THREADS = 15;
 /// How many TCP probes to run at once.
 const MAX_TCP_THREADS = 128;
+/// Cap for one TCP connect attempt, in milliseconds. Bounds discovery
+/// probes and port scans alike, so filtered hosts cost little.
+const CONNECT_TIMEOUT_MS = 500;
+
+// ---------------------------------------------------------------------------
+// TCP connecting with a timeout. Shared by port scanning ("is this port
+// open?") and discovery probing ("is anyone home?").
+// ---------------------------------------------------------------------------
+
+/// What one TCP connect attempt found.
+pub const ProbeOutcome = enum {
+    open, // Connected: the port is open.
+    refused, // RST: the port is closed, but a host answered.
+    filtered, // Timeout or unreachable: no answer at all.
+};
+
+/// Connect to ip:port, waiting at most CONNECT_TIMEOUT_MS.
+/// Zig 0.16 implements no connect timeout itself, hence the hand-rolled
+/// one below (POSIX) and the plain blocking fallback (Windows).
+pub fn tcpConnect(io: std.Io, ip: [4]u8, port: u16) ProbeOutcome {
+    if (comptime builtin.os.tag == .windows) {
+        return tcpConnectBlocking(io, ip, port);
+    }
+    return tcpConnectTimeout(ip, port);
+}
+
+fn tcpConnectBlocking(io: std.Io, ip: [4]u8, port: u16) ProbeOutcome {
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = ip, .port = port } };
+    var stream = addr.connect(io, .{
+        .mode = .stream,
+        .protocol = .tcp,
+        .timeout = .none,
+    }) catch |err| {
+        return if (err == error.ConnectionRefused or err == error.ConnectionResetByPeer)
+            .refused
+        else
+            .filtered;
+    };
+    defer stream.close(io);
+    return .open;
+}
+
+/// POSIX connect with our own timeout. A blocking connect to a dead
+/// host stalls ~75s in SYN retransmits -- so: non-blocking socket,
+/// connect, poll for writable. Classic man-page recipe, one step at
+/// a time.
+fn tcpConnectTimeout(ip: [4]u8, port: u16) ProbeOutcome {
+    const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    if (fd < 0) return .filtered;
+    defer _ = std.c.close(fd);
+
+    const raw_flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (raw_flags < 0) return .filtered;
+    // O_NONBLOCK lives in a packed bit struct on macOS, so flip the bit
+    // through an integer round-trip.
+    var oflags: std.posix.O = @bitCast(@as(u32, @bitCast(raw_flags)));
+    oflags.NONBLOCK = true;
+    if (std.c.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(oflags))) < 0) return .filtered;
+
+    var addr = std.posix.sockaddr.in{
+        .port = std.mem.nativeToBig(u16, port),
+        // @bitCast copies the bytes as-is, which is exactly the network
+        // byte order sockaddr expects.
+        .addr = @bitCast(ip),
+    };
+    const addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(addr));
+    if (std.c.connect(fd, @ptrCast(&addr), addr_len) == 0) return .open;
+
+    // Connection in progress (or already refused): wait until the socket
+    // turns writable, but no longer than our timeout.
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.OUT,
+        .revents = 0,
+    }};
+    if (std.c.poll(&pfd, 1, CONNECT_TIMEOUT_MS) <= 0) return .filtered;
+
+    // Writable: ask the socket what actually happened.
+    var so_error: c_int = 0;
+    var opt_len: std.posix.socklen_t = @sizeOf(c_int);
+    if (std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, @ptrCast(&so_error), &opt_len) != 0) {
+        return .filtered;
+    }
+    return switch (so_error) {
+        0 => .open,
+        @intFromEnum(std.posix.E.CONNREFUSED), @intFromEnum(std.posix.E.CONNRESET) => .refused,
+        else => .filtered,
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Port scanning: try every TCP port in a range on one IP.
@@ -101,34 +190,28 @@ const PortScanCtx = struct {
 
 fn checkPortWorker(ctx: PortScanCtx) void {
     defer ctx.sem.post(ctx.io);
-    checkPort(ctx) catch |err| {
-        std.debug.print("Error checking port {}: {}\n", .{ ctx.port, err });
-    };
+    checkPort(ctx);
 }
 
-fn checkPort(ctx: PortScanCtx) !void {
+fn checkPort(ctx: PortScanCtx) void {
     const io = ctx.io;
     // Small throttle to avoid overwhelming the target.
     io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake) catch {};
 
-    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = ctx.ip, .port = ctx.port } };
-
-    var stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
-        // A refused connection just means "closed". Anything else is
-        // unexpected on a LAN and worth one stderr line.
-        if (err != error.ConnectionRefused) {
-            std.debug.print("Port {d}: {}\n", .{ ctx.port, err });
-        }
-        return;
-    };
-    defer stream.close(io);
-
-    utils.printStdout(io, ctx.stdout_mutex, "Open port: {}\n", .{ctx.port});
-    ctx.ports_mutex.lockUncancelable(io);
-    defer ctx.ports_mutex.unlock(io);
-    ctx.open_ports.append(ctx.allocator, ctx.port) catch |err| {
-        std.debug.print("Error appending port {}: {}\n", .{ ctx.port, err });
-    };
+    switch (tcpConnect(io, ctx.ip, ctx.port)) {
+        .open => {
+            utils.printStdout(io, ctx.stdout_mutex, "Open port: {}\n", .{ctx.port});
+            ctx.ports_mutex.lockUncancelable(io);
+            defer ctx.ports_mutex.unlock(io);
+            ctx.open_ports.append(ctx.allocator, ctx.port) catch |err| {
+                std.debug.print("Error appending port {}: {}\n", .{ ctx.port, err });
+            };
+        },
+        // Closed port: expected, stay quiet.
+        .refused => {},
+        // Unreachable or filtered: one stderr line, then move on.
+        .filtered => std.debug.print("Port {d}: no answer (filtered?)\n", .{ctx.port}),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +354,6 @@ pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) bool {
 // ---------------------------------------------------------------------------
 
 const TCP_PROBE_PORT = 80;
-const TCP_PROBE_TIMEOUT_MS = 500;
 
 /// Find live hosts in a subnet, fast and without root.
 ///
@@ -312,74 +394,14 @@ fn tcpWorker(shares: Discovery, ip: [4]u8) void {
     if (tcpProbe(shares.io, ip)) shares.reportHost(ip, "");
 }
 
-/// Returns true when the host answers a TCP connect (open port) or
-/// actively refuses it (RST on a closed port). Both prove a host is
-/// there; only a timeout (or unreachable network) means "no answer".
+/// Returns true when the host answers on the probe port or actively
+/// refuses the connection. Both prove a host is there; only a timeout
+/// (or unreachable network) means "no answer".
 fn tcpProbe(io: std.Io, ip: [4]u8) bool {
-    // Windows keeps the plain blocking connect for now.
-    if (comptime builtin.os.tag == .windows) {
-        return tcpProbeBlocking(io, ip);
-    }
-    return tcpProbeTimeout(ip);
-}
-
-fn tcpProbeBlocking(io: std.Io, ip: [4]u8) bool {
-    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = ip, .port = TCP_PROBE_PORT } };
-    var stream = addr.connect(io, .{
-        .mode = .stream,
-        .protocol = .tcp,
-        .timeout = .none,
-    }) catch |err| {
-        return err == error.ConnectionRefused or err == error.ConnectionResetByPeer;
+    return switch (tcpConnect(io, ip, TCP_PROBE_PORT)) {
+        .open, .refused => true,
+        .filtered => false,
     };
-    defer stream.close(io);
-    return true;
-}
-
-/// POSIX connect with our own timeout. Zig 0.16 has no connect timeout
-/// yet, and a blocking connect to a dead host stalls ~75s in SYN
-/// retransmits -- so: non-blocking socket, connect, poll for writable.
-/// Classic man-page recipe, one step at a time.
-fn tcpProbeTimeout(ip: [4]u8) bool {
-    const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
-    if (fd < 0) return false;
-    defer _ = std.c.close(fd);
-
-    const raw_flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
-    if (raw_flags < 0) return false;
-    // O_NONBLOCK lives in a packed bit struct on macOS, so flip the bit
-    // through an integer round-trip.
-    var oflags: std.posix.O = @bitCast(@as(u32, @bitCast(raw_flags)));
-    oflags.NONBLOCK = true;
-    if (std.c.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(oflags))) < 0) return false;
-
-    var addr = std.posix.sockaddr.in{
-        .port = std.mem.nativeToBig(u16, TCP_PROBE_PORT),
-        // @bitCast copies the bytes as-is, which is exactly the network
-        // byte order sockaddr expects.
-        .addr = @bitCast(ip),
-    };
-    const addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(addr));
-    if (std.c.connect(fd, @ptrCast(&addr), addr_len) == 0) return true;
-
-    // Connection in progress (or already refused): wait until the socket
-    // turns writable, but no longer than our probe timeout.
-    var pfd = [_]std.posix.pollfd{.{
-        .fd = fd,
-        .events = std.posix.POLL.OUT,
-        .revents = 0,
-    }};
-    if (std.c.poll(&pfd, 1, TCP_PROBE_TIMEOUT_MS) <= 0) return false;
-
-    // Writable: ask the socket what actually happened.
-    var so_error: c_int = 0;
-    var opt_len: std.posix.socklen_t = @sizeOf(c_int);
-    if (std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, @ptrCast(&so_error), &opt_len) != 0) {
-        return false;
-    }
-    return so_error == 0 or
-        so_error == @intFromEnum(std.posix.E.CONNREFUSED) or
-        so_error == @intFromEnum(std.posix.E.CONNRESET);
 }
 
 /// Read the local ARP table and report in-range hosts the TCP sweep
