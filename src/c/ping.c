@@ -7,6 +7,11 @@
 
 #define PING_TIMEOUT_MS 1000
 
+// WARNING: ping(1) -W units are not portable -- milliseconds on macOS,
+// seconds on Linux. The two system-ping commands below both spell the
+// same ~1s wait via PING_TIMEOUT_MS; do not unify the strings without
+// converting units, or Linux dead hosts will hang for ~16 minutes each.
+
 #ifdef _WIN32
 // Windows implementation
 #include <Windows.h>
@@ -68,11 +73,11 @@ bool ping_host(const char *ip_address) {
 
   // Build a command that will exit with status 0 if the host responds
   // -c 1: send one packet
-  // -W 1000: wait max 1000ms for a reply (macOS -W is in milliseconds;
-  //   1ms misses hosts whose ARP entry is cold, causing false negatives)
+  // -W: wait for a reply (milliseconds on macOS: 1000 = 1s; 1ms
+  //   misses hosts whose ARP entry is cold, causing false negatives)
   // -q: quiet output
-  snprintf(cmd, sizeof(cmd), "ping -c 1 -W 1000 -q %s > /dev/null 2>&1",
-           ip_address);
+  snprintf(cmd, sizeof(cmd), "ping -c 1 -W %d -q %s > /dev/null 2>&1",
+           PING_TIMEOUT_MS, ip_address);
 
   // Execute command and check its exit status
   int result = system(cmd);
@@ -117,11 +122,13 @@ unsigned short in_cksum(unsigned short *addr, int len) {
 
 // Simplified Linux ping implementation using raw sockets
 bool ping_host(const char *ip_address) {
-  // For testing non-root access, fall back to system ping
+  // For testing non-root access, fall back to system ping.
+  // -W is in seconds on Linux (see WARNING above): /1000 keeps the
+  // same ~1s wait as macOS.
   if (geteuid() != 0) {
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ping -c 1 -W 1 -q %s > /dev/null 2>&1",
-             ip_address);
+    snprintf(cmd, sizeof(cmd), "ping -c 1 -W %d -q %s > /dev/null 2>&1",
+             PING_TIMEOUT_MS / 1000, ip_address);
     return system(cmd) == 0;
   }
 
