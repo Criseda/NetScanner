@@ -1,0 +1,45 @@
+# NetScanner CI: build + unit tests on all three supported OSes.
+# Part of the v1.0.0 milestone (issue #29). Guards every correctness
+# fix from steps 1-6, so keep it green before merging anything else.
+#
+# Deliberately minimal: `zig build` plus `zig build test`. Live network
+# scans are not CI-friendly, so the Docker lab in docker/ stays manual
+# (see docker/README.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No GitHub API access needed: checkout and build only.
+permissions: {}
+
+jobs:
+  build-and-test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Show all three OS results even when one of them fails.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      # Pinned to build.zig.zon's minimum_zig_version (0.16.0).
+      - name: Set up Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Show the Zig version
+        run: zig version
+
+      # Same command as docs/README.md: builds ./zig-out/bin/ns.
+      - name: Build
+        run: zig build
+
+      - name: Run unit tests
+        run: zig build test --summary all
