@@ -7,6 +7,10 @@ test "ping_host returns boolean" {
     _ = result;
 }
 
+test "ping_host reaches loopback" {
+    try std.testing.expectEqual(true, c_bindings.pingHost("127.0.0.1"));
+}
+
 test "ping_host handles null input" {
     const result = c_bindings.pingHost(null);
     try std.testing.expectEqual(false, result);

@@ -22,46 +22,48 @@
 #include <IPExport.h>
 #include <icmpapi.h>
 
+#include "win_wsa.h"
+
+// Winsock error of the most recent failed ping_host call, for
+// diagnostics. Each thread's IcmpSendEcho runs on its own handle,
+// but this code is the one shared spot failures funnel through.
+static DWORD ping_last_error_value = 0;
+
+DWORD ping_last_error(void) { return ping_last_error_value; }
+
 bool ping_host(const char *ip_address) {
-  HANDLE hIcmp;
-  char send_data[32] = "ping test";
-  LPVOID reply_buffer;
-  DWORD reply_size;
-  IPAddr ip_addr;
+  win_wsa_init_once();
 
-  // Initialize Winsock
-  WSADATA wsaData;
-  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-    return false;
-  }
-
-  hIcmp = IcmpCreateFile();
+  HANDLE hIcmp = IcmpCreateFile();
   if (hIcmp == INVALID_HANDLE_VALUE) {
-    WSACleanup();
+    ping_last_error_value = GetLastError();
     return false;
   }
 
   // Convert IP address string to network byte order
-  ip_addr = inet_addr(ip_address);
-  if (ip_addr == INADDR_NONE) {
+  IPAddr ip_addr;
+  if (InetPtonA(AF_INET, ip_address, &ip_addr) != 1) {
     IcmpCloseHandle(hIcmp);
-    WSACleanup();
     return false;
   }
 
-  reply_size = sizeof(ICMP_ECHO_REPLY) + sizeof(send_data);
-  reply_buffer = (VOID *)malloc(reply_size);
+  char send_data[32] = "ping test";
+  const DWORD reply_size = sizeof(ICMP_ECHO_REPLY) + sizeof(send_data);
+  LPVOID reply_buffer = (VOID *)malloc(reply_size);
+  if (reply_buffer == NULL) {
+    IcmpCloseHandle(hIcmp);
+    return false;
+  }
 
   if (IcmpSendEcho(hIcmp, ip_addr, send_data, sizeof(send_data), NULL,
                    reply_buffer, reply_size, PING_TIMEOUT_MS) != 0) {
     free(reply_buffer);
     IcmpCloseHandle(hIcmp);
-    WSACleanup();
     return true;
   } else {
+    ping_last_error_value = GetLastError();
     free(reply_buffer);
     IcmpCloseHandle(hIcmp);
-    WSACleanup();
     return false;
   }
 }

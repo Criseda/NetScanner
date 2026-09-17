@@ -130,6 +130,28 @@ test "parseArpLine reads macOS and Linux arp -a lines" {
     try std.testing.expect(utils.parseArpLine("not an arp line") == null);
 }
 
+test "parseArpLine reads Windows arp -a lines" {
+    // Real rows: dynamic and static entries alike.
+    const dynamic = utils.parseArpLine("  192.168.0.1           64-fa-2b-b0-93-f1     dynamic");
+    try std.testing.expect(dynamic != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 0, 1 }, &dynamic.?);
+
+    const stat = utils.parseArpLine("  192.168.0.30          2c-cf-67-89-ea-27     dynamic");
+    try std.testing.expect(stat != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 0, 30 }, &stat.?);
+
+    // Headers, blank lines and the empty-table message yield null.
+    try std.testing.expect(utils.parseArpLine("Interface: 192.168.0.39 --- 0x5") == null);
+    try std.testing.expect(utils.parseArpLine("  Internet Address      Physical Address      Type") == null);
+    try std.testing.expect(utils.parseArpLine("") == null);
+    try std.testing.expect(utils.parseArpLine("No ARP Entries Found.") == null);
+
+    // Multicast, broadcast and limited-broadcast rows yield null.
+    try std.testing.expect(utils.parseArpLine("  224.0.0.251           01-00-5e-00-00-fb     static") == null);
+    try std.testing.expect(utils.parseArpLine("  239.255.255.250       01-00-5e-7f-ff-fa     static") == null);
+    try std.testing.expect(utils.parseArpLine("  255.255.255.255       ff-ff-ff-ff-ff-ff     static") == null);
+}
+
 test "usableHosts skips network and broadcast addresses" {
     const network = utils.Network{ .address = .{ 192, 168, 1, 0 }, .prefix_len = 24 };
     const range = utils.IpRange{ .start = .{ 192, 168, 1, 0 }, .end = .{ 192, 168, 1, 255 } };

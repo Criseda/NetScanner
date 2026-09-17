@@ -65,7 +65,10 @@ fn buildLibraries(
         .target = target,
         .optimize = optimize,
     });
-    bindings_module.addImport("core", core_module);
+    // scanner.zig calls into the C helpers through the bindings
+    // module, so core needs the import edge (bindings itself needs
+    // nothing from core).
+    core_module.addImport("bindings", bindings_module);
     return .{ .core = core_module, .bindings = bindings_module };
 }
 
@@ -97,6 +100,8 @@ fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.Resol
     mod.addIncludePath(b.path("src/c"));
     mod.addIncludePath(b.path("."));
     if (target.result.os.tag == .windows) {
+        // Winsock TCP probing with a timeout (see tcp_probe.h).
+        mod.addCSourceFile(.{ .file = b.path("src/c/tcp_probe.c"), .flags = &[_][]const u8{"-Wall"} });
         mod.linkSystemLibrary("iphlpapi", .{});
         mod.linkSystemLibrary("ws2_32", .{});
     }
