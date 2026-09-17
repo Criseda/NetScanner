@@ -220,23 +220,30 @@ pub fn ipInRange(ip: [4]u8, first: [4]u8, last: [4]u8) bool {
 
 /// Parse one neighbour-table line into an IP address.
 ///
-/// Understands two formats:
+/// Understands three formats:
 ///   `arp -a` (macOS/Linux): "? (192.168.1.1) at 10:e6:... on en0 ..."
+///   `arp -a` (Windows):     "  192.168.0.1  64-fa-2b-b0-93-f1  dynamic"
 ///   `ip neigh` (Linux):     "192.168.1.1 dev eth0 lladdr 10:e6:... REACHABLE"
-/// Returns null for dead entries (incomplete/FAILED), multicast lines
-/// and anything unparseable (including the Windows format, for now).
+/// Returns null for dead entries (incomplete/FAILED), header lines,
+/// multicast rows and anything unparseable. Harvested candidates are
+/// ping-verified before being reported, so an occasional stray row
+/// (e.g. a directed broadcast) is harmless.
 pub fn parseArpLine(line: []const u8) ?[4]u8 {
     const trimmed = std.mem.trim(u8, line, " \t\r");
     if (trimmed.len == 0) return null;
     if (std.mem.indexOf(u8, trimmed, "incomplete") != null) return null;
     if (std.mem.indexOf(u8, trimmed, "FAILED") != null) return null;
-    // `arp -a` puts the address in parentheses ...
+    // `arp -a` on macOS/Linux puts the address in parentheses ...
     if (std.mem.indexOfScalar(u8, trimmed, '(')) |open| {
         const close = std.mem.indexOfScalarPos(u8, trimmed, open, ')') orelse return null;
-        return ipStringToBytes(trimmed[open + 1 .. close]) catch null;
+        const ip = ipStringToBytes(trimmed[open + 1 .. close]) catch return null;
+        return if (ip[0] >= 224) null else ip;
     }
-    // ... while `ip neigh` leads with it.
-    const end = std.mem.indexOfScalar(u8, trimmed, ' ') orelse trimmed.len;
+    // ... while Windows `arp -a` rows and `ip neigh` both lead with
+    // it, so the first whitespace-separated token is the address.
+    // Header lines ("Interface: ...", "Internet Address ...") fail to
+    // parse as an IP and fall out here.
+    const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
     const ip = ipStringToBytes(trimmed[0..end]) catch return null;
     // Multicast and reserved ranges are never LAN hosts.
     if (ip[0] >= 224) return null;

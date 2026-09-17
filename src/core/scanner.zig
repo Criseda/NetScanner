@@ -18,7 +18,10 @@ const MAX_PORT_THREADS = 100;
 const MAX_TCP_THREADS = 128;
 /// Cap for one TCP connect attempt, in milliseconds. Bounds discovery
 /// probes and port scans alike, so filtered hosts cost little.
-const CONNECT_TIMEOUT_MS = 500;
+/// Windows gets the larger bound: refusals there can arrive seconds
+/// late behind filtering middleboxes, while clean hosts still resolve
+/// in milliseconds through the early signal.
+const CONNECT_TIMEOUT_MS: c_int = if (builtin.os.tag == .windows) 3000 else 500;
 
 // ---------------------------------------------------------------------------
 // TCP connecting with a timeout. Shared by port scanning ("is this port
@@ -33,29 +36,31 @@ pub const ProbeOutcome = enum {
 };
 
 /// Connect to ip:port, waiting at most CONNECT_TIMEOUT_MS.
-/// Zig 0.16 implements no connect timeout itself, hence the hand-rolled
-/// one below (POSIX) and the plain blocking fallback (Windows).
-pub fn tcpConnect(io: std.Io, ip: [4]u8, port: u16) ProbeOutcome {
+/// Zig 0.16 implements no connect timeout itself: POSIX uses the
+/// hand-rolled non-blocking recipe below, while Windows goes through
+/// the Winsock helper in src/c/tcp_probe.c -- the blocking std.Io
+/// connect cannot tell refused apart from filtered there (every
+/// failure arrives as error.Unexpected) and has no timeout.
+pub fn tcpConnect(ip: [4]u8, port: u16) ProbeOutcome {
     if (comptime builtin.os.tag == .windows) {
-        return tcpConnectBlocking(io, ip, port);
+        return tcpConnectWinsock(ip, port);
     }
     return tcpConnectTimeout(ip, port);
 }
 
-fn tcpConnectBlocking(io: std.Io, ip: [4]u8, port: u16) ProbeOutcome {
-    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = ip, .port = port } };
-    var stream = addr.connect(io, .{
-        .mode = .stream,
-        .protocol = .tcp,
-        .timeout = .none,
-    }) catch |err| {
-        return if (err == error.ConnectionRefused or err == error.ConnectionResetByPeer)
-            .refused
-        else
-            .filtered;
+/// Windows connect with our own timeout, via the C Winsock helper.
+/// The address is formatted on the stack: dotted IPv4 is at most 15
+/// characters plus the terminator.
+fn tcpConnectWinsock(ip: [4]u8, port: u16) ProbeOutcome {
+    var addr_buf: [16]u8 = undefined;
+    const addr = std.fmt.bufPrintZ(&addr_buf, "{d}.{d}.{d}.{d}", .{
+        ip[0], ip[1], ip[2], ip[3],
+    }) catch return .filtered;
+    return switch (c_bindings.tcpProbe(addr, port, CONNECT_TIMEOUT_MS)) {
+        .open => .open,
+        .refused => .refused,
+        .filtered => .filtered,
     };
-    defer stream.close(io);
-    return .open;
 }
 
 /// POSIX connect with our own timeout. A blocking connect to a dead
@@ -196,7 +201,7 @@ fn checkPort(ctx: PortScanCtx) void {
     // Small throttle to avoid overwhelming the target.
     io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake) catch {};
 
-    switch (tcpConnect(io, ctx.ip, ctx.port)) {
+    switch (tcpConnect(ctx.ip, ctx.port)) {
         .open => {
             utils.printStdout(io, ctx.stdout_mutex, "Open port: {}\n", .{ctx.port});
             ctx.ports_mutex.lockUncancelable(io);
@@ -330,14 +335,10 @@ fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, ra
 /// concurrent system() calls process-wide, which used to turn every
 /// ping sweep serial (~2s/host). posix-spawned children have no such
 /// lock, so a whole subnet resolves in about one wait each.
+///
+/// The command line differs per OS: POSIX ping takes -c/-W/-q while
+/// Windows ping takes -n/-w (milliseconds) and has no quiet flag.
 fn pingSweep(allocator: std.mem.Allocator, io: std.Io, ips: []const [4]u8) ![]bool {
-    // ping(1) -W units: milliseconds on macOS, seconds elsewhere --
-    // both spell ~1s. Matches the WARNING in src/c/ping.c.
-    const wait_arg = switch (comptime builtin.os.tag) {
-        .macos => "1000",
-        else => "1",
-    };
-
     const alive = try allocator.alloc(bool, ips.len);
     errdefer allocator.free(alive);
 
@@ -353,9 +354,19 @@ fn pingSweep(allocator: std.mem.Allocator, io: std.Io, ips: []const [4]u8) ![]bo
     var children: std.ArrayList(std.process.Child) = .empty;
     defer children.deinit(allocator);
     for (ip_strings) |ip_string| {
-        const argv = [_][]const u8{ "ping", "-c", "1", "-W", wait_arg, "-q", ip_string };
+        var argv: [7][]const u8 = undefined;
+        const argc: usize = if (comptime builtin.os.tag == .windows) blk: {
+            argv[0..6].* = [_][]const u8{ "ping", "-n", "1", "-w", "1000", ip_string };
+            break :blk 6;
+        } else blk: {
+            // ping(1) -W units: milliseconds on macOS, seconds elsewhere --
+            // both spell ~1s. Matches the WARNING in src/c/ping.c.
+            const wait_arg: []const u8 = if (comptime builtin.os.tag == .macos) "1000" else "1";
+            argv[0..7].* = [_][]const u8{ "ping", "-c", "1", "-W", wait_arg, "-q", ip_string };
+            break :blk 7;
+        };
         const child = try std.process.spawn(io, .{
-            .argv = &argv,
+            .argv = argv[0..argc],
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
@@ -411,7 +422,8 @@ pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u
 
 /// Ping one host through the C helper. Returns true when it answers.
 /// Anything the ping cannot even attempt (bad address, no memory)
-/// counts as unanswered rather than as an error.
+/// counts as unanswered rather than as an error. On Windows a failed
+/// ping also logs the Winsock error, so silent misses stay diagnosable.
 pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) bool {
     const ip_string = utils.ipBytesToString(allocator, ip) catch return false;
     defer allocator.free(ip_string);
@@ -419,7 +431,12 @@ pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) bool {
     const ip_with_null = allocator.dupeZ(u8, ip_string) catch return false;
     defer allocator.free(ip_with_null);
 
-    return c_bindings.pingHost(ip_with_null.ptr);
+    const ok = c_bindings.pingHost(ip_with_null.ptr);
+    if (!ok) {
+        const err = c_bindings.pingLastError();
+        if (err != 0) std.debug.print("ping {s} failed: Winsock error {d}\n", .{ ip_string, err });
+    }
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -479,14 +496,14 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
 
 fn tcpWorker(shares: Discovery, ip: [4]u8) void {
     defer shares.sem.post(shares.io);
-    if (tcpProbe(shares.io, ip)) shares.reportHost(ip, "");
+    if (tcpProbe(ip)) shares.reportHost(ip, "");
 }
 
 /// Returns true when the host answers on the probe port or actively
 /// refuses the connection. Both prove a host is there; only a timeout
 /// (or unreachable network) means "no answer".
-fn tcpProbe(io: std.Io, ip: [4]u8) bool {
-    return switch (tcpConnect(io, ip, TCP_PROBE_PORT)) {
+fn tcpProbe(ip: [4]u8) bool {
+    return switch (tcpConnect(ip, TCP_PROBE_PORT)) {
         .open, .refused => true,
         .filtered => false,
     };
@@ -496,7 +513,7 @@ fn tcpProbe(io: std.Io, ip: [4]u8) bool {
 /// then ping each candidate once before reporting it. The ping matters:
 /// entries linger up to ~20min after a host leaves, so a complete entry
 /// alone is not proof. Needs no privileges; `arp -a` exists on macOS,
-/// Linux and Windows (only the first two formats are parsed for now).
+/// Linux and Windows, and all three table formats are parsed.
 fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     const table = readArpTable(shares) orelse return;
     defer shares.allocator.free(table);
