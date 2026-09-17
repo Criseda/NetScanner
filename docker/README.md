@@ -3,7 +3,7 @@
 Test NetScanner on Linux without owning a Linux box. Related issue: #28.
 Windows and macOS can't be containerized (Windows containers need a
 Windows host, macOS containers don't exist), so those are tested on
-real hosts directly — see #24 for Windows.
+real hosts directly (see #24 for Windows).
 
 ## Support matrix
 
@@ -14,8 +14,9 @@ real hosts directly — see #24 for Windows.
 
 ## Quick start (Linux lab)
 
-One command brings up a virtual `/24` with two neighbours — a quiet
-box (answers ping, drops TCP) and a web box (port 80 open) — plus a
+One command brings up a virtual `/24` with two neighbours (a quiet
+box that answers ping and drops TCP, and a web box with port 80
+open), plus a
 scanner shell with the repo mounted:
 
 ```sh

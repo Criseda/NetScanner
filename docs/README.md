@@ -5,58 +5,92 @@
 ![OS](https://img.shields.io/badge/OS-Linux%2C%20MacOS%2C%20Windows-blue)
 ![License](https://img.shields.io/badge/License-GNU%20GPL--3.0-green)
 
+Command line tool written in Zig for scanning and analyzing local
+networks. The root [README](../README.md) is the short version, this
+file is the full guide.
 
-## 🚀 About
+## Table of Contents
 
-Command-line tool written in Zig for scanning and analyzing local networks
+1. [Usage](#usage)
+2. [Installation](#installation)
+3. [Build](#build)
+4. [Testing](#testing)
+5. [Release builds](#release-builds)
+6. [Linux test lab](#linux-test-lab)
+7. [Branches](#branches)
+8. [License](#license)
 
-## 📋 Table of Contents
-
-1. ✨ [Usage](#usage)
-2. 🔨 [Installation](#installation)
-3. ⚙️ [Build](#build)
-4. ©️ [License](../LICENSE)
-
-## <a name="usage">✨ Usage</a>
+## Usage
 
 ```sh
-ns -p <ip> <port-range>    # Scan one IP for open ports (example: 192.168.1.1 1-1024)
 ns -s <subnet> [--ping]    # Find live hosts (example: 192.168.0.1/24)
-                           # Default is fast TCP + ARP discovery; --ping uses ICMP instead
+ns -p <ip> <port-range>    # Scan one host for open ports (example: 192.168.1.1 1-1024)
 ns --help                  # Display help message
 ns --version               # Display version
 ```
 
-## <a name="installation">🔨 Installation</a>
+`ns -s` runs fast TCP plus ARP discovery by default. The TCP sweep
+finds hosts with open ports, and the ARP harvest pass catches quiet
+hosts that answer ARP but drop TCP. Harvest only candidates are
+verified with a targeted probe before being reported, so stale table
+entries do not turn into false positives. Pass `--ping` to use one
+ICMP ping per host instead.
 
-Requires [Zig](https://ziglang.org/) 0.16.0 or newer (see `build.zig.zon`).
+Results stream as hosts are found, then a sorted recap lists every
+host numerically followed by a one line summary such as
+`12 hosts up (2.1s)`, so output is easy to scan and diff.
 
-## <a name="build">⚙️ Build </a>
+## Installation
 
-To build for your platform from source
+Requires [Zig](https://ziglang.org/) 0.16.0 or newer (see
+`build.zig.zon`) when building from source.
+
+Either download a prebuilt binary from
+[GitHub Releases](https://github.com/Criseda/NetScanner/releases)
+(v1.0.0 and later), or build from source as described below.
+
+## Build
+
+To build for your platform from source:
 
 ```sh
 cd /path/to/repo     # Change to the project directory
 zig build            # Build the project
-cd ./zig-out/bin/    # Change to the output directory
-ns --help            # Run the program
+./zig-out/bin/ns --help
 ```
 
-To run the tests:
+## Testing
 
 ```sh
 zig build test --summary all
 ```
 
-(DEV) to build the cross-platform releases
+CI runs the same two commands on Linux, macOS and Windows (see
+`.github/workflows/ci.yml`).
+
+## Release builds
+
+Maintainers build all five release binaries with:
 
 ```sh
-cd /path/to/repo
 zig build release -Doptimize=ReleaseFast
-cd ./zig-out/bin/releases
 ```
+
+Binaries land in `zig-out/releases/`, one folder per platform
+(`windows`, `macos-x86_64`, `macos-arm64`, `linux-x86_64`,
+`linux-arm64`).
+
+## Linux test lab
+
+`docker/README.md` describes a virtual LAN for testing on Linux
+without owning a Linux box. Windows and macOS cannot be
+containerized, so those are tested on real hosts directly.
 
 ## Branches
 
-`main` is the only long-lived branch. The old `develop` branch was merged
-into `main` (stdout fix + README updates) and deleted.
+`main` is the only long lived branch. The old `develop` branch was
+merged into `main` and deleted.
+
+## License
+
+GNU GPL-3.0, see [LICENSE](../LICENSE).
