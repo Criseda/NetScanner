@@ -44,9 +44,9 @@ which uses ICMP instead.
 
 ## Docs
 
-- `docs/README.md` has the full guide: install options, build and
+- [docs/README.md](docs/README.md) has the full guide: install options, build and
   test commands, release builds and notes on each discovery mode.
-- `docker/README.md` describes the Linux test lab, a virtual LAN you
+- [docker/README.md](docker/README.md) describes the Linux test lab, a virtual LAN you
   can scan without owning a Linux box.
 
 ## License
