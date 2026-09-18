@@ -205,3 +205,59 @@ test "collectIps expands a range inclusively" {
     defer single.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), single.items.len);
 }
+
+test "parseMac and formatMac" {
+    const mac_colon = utils.parseMac("64:fa:2b:b0:93:f1");
+    try std.testing.expect(mac_colon != null);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x64, 0xfa, 0x2b, 0xb0, 0x93, 0xf1 }, &mac_colon.?);
+
+    const mac_dash = utils.parseMac("00-11-32-4F-C2-75");
+    try std.testing.expect(mac_dash != null);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x11, 0x32, 0x4f, 0xc2, 0x75 }, &mac_dash.?);
+
+    var buf: [17]u8 = undefined;
+    const formatted = utils.formatMac(&buf, mac_dash.?);
+    try std.testing.expectEqualStrings("00:11:32:4f:c2:75", formatted);
+
+    // Invalid MAC strings
+    try std.testing.expect(utils.parseMac("invalid") == null);
+    try std.testing.expect(utils.parseMac("00:11:22:33:44") == null);
+    try std.testing.expect(utils.parseMac("00:11:22:33:44:55:66") == null);
+    try std.testing.expect(utils.parseMac("00:11:22:33:44:zz") == null);
+}
+
+test "parseArpEntry extracts both IP and MAC" {
+    // macOS
+    const mac_line = utils.parseArpEntry("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
+    try std.testing.expect(mac_line != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &mac_line.?.ip);
+    try std.testing.expect(mac_line.?.mac != null);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x10, 0xe6, 0x6b, 0x26, 0x7e, 0x53 }, &mac_line.?.mac.?);
+    try std.testing.expect(!mac_line.?.is_reachable);
+
+    // Linux ip neigh (REACHABLE)
+    const neigh_line = utils.parseArpEntry("192.168.1.20 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE");
+    try std.testing.expect(neigh_line != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 20 }, &neigh_line.?.ip);
+    try std.testing.expect(neigh_line.?.mac != null);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff }, &neigh_line.?.mac.?);
+    try std.testing.expect(neigh_line.?.is_reachable);
+
+    // Linux ip neigh (DELAY)
+    const delay_line = utils.parseArpEntry("192.168.1.21 dev eth0 lladdr 11:22:33:44:55:66 DELAY");
+    try std.testing.expect(delay_line != null);
+    try std.testing.expect(delay_line.?.is_reachable);
+
+    // Linux ip neigh (STALE)
+    const stale_line = utils.parseArpEntry("192.168.1.22 dev eth0 lladdr 11:22:33:44:55:77 STALE");
+    try std.testing.expect(stale_line != null);
+    try std.testing.expect(!stale_line.?.is_reachable);
+
+    // Windows
+    const win_line = utils.parseArpEntry("  192.168.0.30          2c-cf-67-89-ea-27     dynamic");
+    try std.testing.expect(win_line != null);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 0, 30 }, &win_line.?.ip);
+    try std.testing.expect(win_line.?.mac != null);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x2c, 0xcf, 0x67, 0x89, 0xea, 0x27 }, &win_line.?.mac.?);
+    try std.testing.expect(!win_line.?.is_reachable);
+}

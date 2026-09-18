@@ -12,8 +12,8 @@
 // copy: two files mean two startups and two matching cleanups, which
 // stays balanced because WSAStartup/WSACleanup are reference counted.
 
-#include <Windows.h>
 #include <WinSock2.h>
+#include <Windows.h>
 #include <stdlib.h>
 
 static INIT_ONCE win_wsa_once = INIT_ONCE_STATIC_INIT;

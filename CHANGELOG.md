@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.2.0
+
+Hostname resolution and hardware manufacturer lookup for subnet scans (`-s`), with zero extra privileges or external tools required:
+
+- `--resolve`: Automatically resolves hostnames (via Reverse DNS PTR, RFC 6762 mDNS port 5353 queries, and RFC 1002 NetBIOS Name Service queries) and hardware manufacturers (via ARP table MAC extraction and embedded OUI lookup).
+- `--hostname`: Resolves hostnames only (mDNS, NetBIOS NBNS, and Reverse DNS with domain suffix stripping).
+- `--vendor`: Looks up MAC addresses and hardware manufacturer names only, with fallback to Windows `SendARP` for local interface / missing ARP entries.
+- `--oui-file <path>`: Allows loading an external Wireshark `manuf` or IEEE OUI database file for custom or offline OUI lookups, with support for colon (`:`) and hyphen (`-`) delimiters and varying hex widths.
+- Embedded OUI database: Bundles ~2,000 curated, balanced hardware manufacturer prefixes parsed at compile time from standard Wireshark flat format and sorted in `.rodata` for sub-microsecond binary search lookup (< 50ns per host) with zero external runtime dependencies.
+- Ping-blocking host discovery: ARP harvest pass verifies candidates that drop ICMP ping via a parallel SendARP worker pool on Windows and kernel neighbor reachability evaluation (REACHABLE/DELAY states) on Linux, capturing firewalled IoT devices and network gear (GL.iNet, TP-Link, smart home gear) in milliseconds without stalling discovery sweeps.
+- Terminal escape sequence filtering: Enforces printable ASCII validation on hostnames retrieved over NetBIOS and mDNS to prevent ANSI escape sequence injection.
+- Redesigned usage & help formatting: Clear, structured CLI overview with categorized sections (`COMMANDS`, `SUBNET OPTIONS`, `PORT OPTIONS`, `GLOBAL FLAGS`, and `EXAMPLES`) and `-h` / `-v` shorthands.
+- Output formatting: Displays an aligned tabular view (`IP`, `HOSTNAME`, `MAC`, `MANUFACTURER`) when resolution flags are used, while preserving the clean, compact numerical recap when flags are omitted.
+- Fully cross-platform across Windows, Linux, and macOS without requiring root or administrator privileges.
+
 ## v1.1.0
 
 Port scanning is faster and quieter, with no new privileges required:

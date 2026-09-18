@@ -15,9 +15,9 @@ pub fn main(init: std.process.Init) !void {
 
     const command = args[1];
 
-    if (std.mem.eql(u8, command, "--help")) {
+    if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         try utils.printUsage(io);
-    } else if (std.mem.eql(u8, command, "--version")) {
+    } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         try utils.printVersion(io);
     } else if (std.mem.eql(u8, command, "-p")) {
         try runPortScan(gpa, io, args);
@@ -110,18 +110,48 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
     }
 }
 
-/// `ns -s <subnet> [--ping]`: find live hosts. Fast TCP + ARP discovery
-/// by default, one-ping-per-host with --ping.
+/// `ns -s <subnet> [options]`: find live hosts. Fast TCP + ARP discovery
+/// by default, one-ping-per-host with --ping. Optional --resolve,
+/// --hostname, --vendor, and --oui-file.
 fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     if (args.len < 3) {
         try utils.printUsage(io);
         return;
     }
     const cidr = args[2];
-    const use_ping = args.len > 3 and std.mem.eql(u8, args[3], "--ping");
+    var use_ping = false;
+    var scan_options = scanner.NetworkScanOptions{};
+
+    var i: usize = 3;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--ping")) {
+            use_ping = true;
+        } else if (std.mem.eql(u8, arg, "--resolve")) {
+            scan_options.resolve_hostname = true;
+            scan_options.resolve_vendor = true;
+        } else if (std.mem.eql(u8, arg, "--hostname")) {
+            scan_options.resolve_hostname = true;
+        } else if (std.mem.eql(u8, arg, "--vendor")) {
+            scan_options.resolve_vendor = true;
+        } else if (std.mem.eql(u8, arg, "--oui-file")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("NetScanner: --oui-file requires a file path\n", .{});
+                return;
+            }
+            scan_options.oui_file = args[i];
+            scan_options.resolve_vendor = true;
+        } else {
+            std.debug.print("NetScanner: Unknown option '{s}'\n", .{arg});
+            try utils.printUsage(io);
+            return;
+        }
+    }
+
     if (use_ping) {
-        try scanner.scanNetworkPing(allocator, io, cidr);
+        try scanner.scanNetworkPing(allocator, io, cidr, scan_options);
     } else {
-        try scanner.scanNetwork(allocator, io, cidr);
+        try scanner.scanNetwork(allocator, io, cidr, scan_options);
     }
 }
