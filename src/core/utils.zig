@@ -55,17 +55,19 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
     var ip_bytes: [4]u8 = undefined;
     var byte: u8 = 0;
     var byte_index: u8 = 0;
+    var has_digits = false;
     var ip_string_index: usize = 0;
 
     while (ip_string_index < ip_string.len) : (ip_string_index += 1) {
         const char = ip_string[ip_string_index];
         if (char == '.') {
-            if (byte_index >= 4) {
+            if (byte_index >= 4 or !has_digits) {
                 return error.InvalidIpAddress;
             }
             ip_bytes[byte_index] = byte;
             byte = 0;
             byte_index += 1;
+            has_digits = false;
             continue;
         }
         if (char < '0' or char > '9') {
@@ -77,9 +79,10 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
             return error.InvalidIpAddress;
         }
         byte = byte * 10 + digit;
+        has_digits = true;
     }
 
-    if (byte_index != 3) {
+    if (byte_index != 3 or !has_digits) {
         return error.InvalidIpAddress;
     }
     ip_bytes[byte_index] = byte;
@@ -149,6 +152,7 @@ pub fn getIpRange(network: Network) !IpRange {
 }
 
 fn computeMask(prefix_len: u8) u32 {
+    if (prefix_len == 0) return 0;
     if (prefix_len == 32) {
         return 0xFFFFFFFF;
     } else {

@@ -59,7 +59,7 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
 
     const ip_address = [4]u8{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] };
 
-    var open_ports = try scanner.scanPorts(allocator, io, ip_address, port_array[0], port_array[1]);
+    var open_ports = try scanner.scanPorts(allocator, io, ip_address, port_array[0], port_array[1], .{});
     defer open_ports.deinit(allocator);
 
     var stdout_mutex: std.Io.Mutex = .init;
