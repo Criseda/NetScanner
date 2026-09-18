@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.0
 
 Port scanning is faster and quieter, with no new privileges required:
 
