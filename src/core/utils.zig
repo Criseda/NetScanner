@@ -54,7 +54,7 @@ pub fn printUsage(io: std.Io) !void {
 }
 
 pub fn printVersion(io: std.Io) !void {
-    const version = "v1.2.0";
+    const version = "v1.2.1";
     var buf: [64]u8 = undefined;
     var w = stdoutWriter(io, &buf);
     try w.interface.print("{s}\n", .{version});
@@ -279,9 +279,9 @@ pub fn formatMac(buf: *[17]u8, mac: [6]u8) []const u8 {
 /// Parse one neighbour-table line into an ArpEntry (IP, optional MAC, and reachability).
 ///
 /// Understands three formats:
-///   `arp -a` (macOS/Linux): "? (192.168.1.1) at 10:e6:... on en0 ..."
-///   `arp -a` (Windows):     "  192.168.0.1  64-fa-2b-b0-93-f1  dynamic"
-///   `ip neigh` (Linux):     "192.168.1.1 dev eth0 lladdr 10:e6:... REACHABLE"
+///   `arp -a` (macOS/Linux): "? (192.168.1.1) at 00:11:... on en0 ..."
+///   `arp -a` (Windows):     "  192.168.1.1  00-11-22-33-44-55  dynamic"
+///   `ip neigh` (Linux):     "192.168.1.1 dev eth0 lladdr 00:11:... REACHABLE"
 /// Returns null for dead entries (incomplete/FAILED), header lines,
 /// multicast rows and anything unparseable.
 pub fn parseArpEntry(line: []const u8) ?ArpEntry {

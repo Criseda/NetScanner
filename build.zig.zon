@@ -1,6 +1,6 @@
 .{
     .name = .NetScanner,
-    .version = "1.2.0",
+    .version = "1.2.1",
     .minimum_zig_version = "0.16.0",
     .paths = .{""},
     .fingerprint = 0x5a293d2f4a628cf2,

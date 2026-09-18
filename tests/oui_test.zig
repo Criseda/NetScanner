@@ -12,10 +12,38 @@ test "embedded OUI lookup for known devices" {
     try std.testing.expect(pi != null);
     try std.testing.expectEqualStrings("Raspberry Pi (Trading) Ltd", pi.?);
 
-    // Sagemcom (Virgin Media router)
+    // Sagemcom Broadband router
     const router = oui.lookupEmbeddedVendor([6]u8{ 0x64, 0xfa, 0x2b, 0x00, 0x11, 0x22 });
     try std.testing.expect(router != null);
     try std.testing.expectEqualStrings("Sagemcom Broadband SAS", router.?);
+
+    // Apple
+    const apple = oui.lookupEmbeddedVendor([6]u8{ 0x00, 0x03, 0x93, 0x11, 0x22, 0x33 });
+    try std.testing.expect(apple != null);
+    try std.testing.expectEqualStrings("Apple, Inc.", apple.?);
+
+    // Intel
+    const intel = oui.lookupEmbeddedVendor([6]u8{ 0x00, 0x02, 0xb3, 0xaa, 0xbb, 0xcc });
+    try std.testing.expect(intel != null);
+    try std.testing.expectEqualStrings("Intel Corporation", intel.?);
+
+    // Cisco
+    const cisco = oui.lookupEmbeddedVendor([6]u8{ 0x00, 0x00, 0x0c, 0x12, 0x34, 0x56 });
+    try std.testing.expect(cisco != null);
+    try std.testing.expectEqualStrings("Cisco Systems, Inc", cisco.?);
+
+    // Samsung
+    const samsung = oui.lookupEmbeddedVendor([6]u8{ 0x00, 0x00, 0xf0, 0x55, 0x66, 0x77 });
+    try std.testing.expect(samsung != null);
+    try std.testing.expectEqualStrings("Samsung Electronics Co.,Ltd", samsung.?);
+
+    // Espressif (smart plugs / IoT)
+    const espressif = oui.lookupEmbeddedVendor([6]u8{ 0x18, 0xfe, 0x34, 0x01, 0x02, 0x03 });
+    try std.testing.expect(espressif != null);
+    try std.testing.expectEqualStrings("Espressif Inc.", espressif.?);
+
+    // Full database size check (all ~40,000 standard 24-bit OUIs)
+    try std.testing.expect(oui.EMBEDDED_COUNT >= 39000);
 
     // Unknown MAC (locally administered / unassigned)
     const unknown = oui.lookupEmbeddedVendor([6]u8{ 0x02, 0x00, 0x00, 0x11, 0x22, 0x33 });
