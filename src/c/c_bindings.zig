@@ -5,7 +5,54 @@ pub const c = struct {
     pub extern "c" fn ping_host(ip_address: [*:0]const u8) bool;
     pub extern "c" fn tcp_probe(ip_address: [*:0]const u8, port: u16, timeout_ms: c_int) c_int;
     pub extern "c" fn ping_last_error() u32;
+    pub extern "c" fn resolve_ptr(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize) c_int;
+    pub extern "c" fn query_netbios(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
+    pub extern "c" fn query_mdns(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
+    pub extern "c" fn read_file_content(path: [*:0]const u8, out_len: *usize) ?[*]u8;
+    pub extern "c" fn free_file_content(ptr: [*]u8) void;
+    pub extern "c" fn get_mac_sendarp(ip_address: [*:0]const u8, out_mac: [*]u8) c_int;
 };
+
+const std = @import("std");
+
+pub fn getMacSendArp(ip_null_terminated: [*:0]const u8) ?[6]u8 {
+    var mac: [6]u8 = undefined;
+    if (c.get_mac_sendarp(ip_null_terminated, &mac) == 0) {
+        return mac;
+    }
+    return null;
+}
+
+pub fn readFileContent(path_null_terminated: [*:0]const u8) ?[]const u8 {
+    var len: usize = 0;
+    const ptr = c.read_file_content(path_null_terminated, &len) orelse return null;
+    return ptr[0..len];
+}
+
+pub fn freeFileContent(slice: []const u8) void {
+    c.free_file_content(@constCast(slice.ptr));
+}
+
+pub fn resolvePtr(ip_null_terminated: [*:0]const u8, buf: []u8) ?[]const u8 {
+    if (c.resolve_ptr(ip_null_terminated, buf.ptr, buf.len) == 0) {
+        return std.mem.sliceTo(buf, 0);
+    }
+    return null;
+}
+
+pub fn queryNetbios(ip_null_terminated: [*:0]const u8, buf: []u8, timeout_ms: c_int) ?[]const u8 {
+    if (c.query_netbios(ip_null_terminated, buf.ptr, buf.len, timeout_ms) == 0) {
+        return std.mem.sliceTo(buf, 0);
+    }
+    return null;
+}
+
+pub fn queryMdns(ip_null_terminated: [*:0]const u8, buf: []u8, timeout_ms: c_int) ?[]const u8 {
+    if (c.query_mdns(ip_null_terminated, buf.ptr, buf.len, timeout_ms) == 0) {
+        return std.mem.sliceTo(buf, 0);
+    }
+    return null;
+}
 
 pub fn pingHost(ip: ?[*:0]const u8) bool {
     if (ip == null) {

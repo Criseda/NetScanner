@@ -16,24 +16,45 @@ fn stdoutWriter(io: std.Io, buffer: []u8) std.Io.File.Writer {
 
 pub fn printUsage(io: std.Io) !void {
     const usage =
-        \\ns <command>
+        \\NetScanner - Fast, zero-privilege network discovery & port scanner
         \\
-        \\Usage:
+        \\USAGE:
+        \\  ns -s <subnet> [options]
+        \\  ns -p <ip> <ports> [options]
+        \\  ns [flags]
         \\
-        \\ns -p <ip> <port-range> [--timeout <ms>]    Scan one IP for open ports (example: 192.168.1.1 1-1024)
-        \\ns -s <subnet> [--ping]    Find live hosts in a subnet (example: 192.168.0.1/24)
-        \\                           Default is fast TCP + ARP discovery; --ping uses ICMP instead
-        \\ns --help                  Display this help message
-        \\ns --version               Display the version of NetScanner
+        \\COMMANDS:
+        \\  -s <subnet>                 Find live hosts in a subnet (e.g. 192.168.0.1/24)
+        \\                              Default: fast TCP + ARP sweep; use --ping for ICMP
+        \\  -p <ip> <ports>             Scan an IP for open ports (e.g. 192.168.1.1 1-1024)
+        \\
+        \\SUBNET OPTIONS (-s):
+        \\  --resolve                   Resolve hostnames and hardware manufacturers
+        \\  --hostname                  Resolve hostnames only (mDNS, NetBIOS, Reverse DNS)
+        \\  --vendor                    Lookup MAC addresses and hardware manufacturers
+        \\  --oui-file <path>           Load custom Wireshark or IEEE OUI database file
+        \\  --ping                      Use ICMP ping sweep instead of TCP + ARP
+        \\
+        \\PORT OPTIONS (-p):
+        \\  --timeout <ms>              Probe connection timeout in milliseconds (default: 500)
+        \\
+        \\FLAGS:
+        \\  -h, --help                  Display this help message
+        \\  -v, --version               Display version information
+        \\
+        \\EXAMPLES:
+        \\  ns -s 192.168.0.1/24 --resolve
+        \\  ns -s 10.0.0.1/24 --ping
+        \\  ns -p 192.168.1.1 20-80 --timeout 250
     ;
-    var buf: [1024]u8 = undefined;
+    var buf: [2048]u8 = undefined;
     var w = stdoutWriter(io, &buf);
     try w.interface.print("{s}\n", .{usage});
     try w.interface.flush();
 }
 
 pub fn printVersion(io: std.Io) !void {
-    const version = "v1.1.0";
+    const version = "v1.2.0";
     var buf: [64]u8 = undefined;
     var w = stdoutWriter(io, &buf);
     try w.interface.print("{s}\n", .{version});
@@ -222,34 +243,97 @@ pub fn ipInRange(ip: [4]u8, first: [4]u8, last: [4]u8) bool {
     return value >= ipToU32(first) and value <= ipToU32(last);
 }
 
-/// Parse one neighbour-table line into an IP address.
+/// Represents a single host entry discovered from the operating system's
+/// kernel neighbour/ARP table.
+pub const ArpEntry = struct {
+    ip: [4]u8,
+    mac: ?[6]u8 = null,
+    /// On Linux, `ip neigh` explicitly marks confirmed entries as "REACHABLE"
+    /// or "DELAY" (currently undergoing reachability confirmation).
+    is_reachable: bool = false,
+};
+
+/// Parse a MAC address in colon or hyphen format (e.g., "64-fa-2b-b0-93-f1" or "10:e6:6b:26:7e:53").
+pub fn parseMac(s: []const u8) ?[6]u8 {
+    var mac: [6]u8 = undefined;
+    var byte_idx: usize = 0;
+    var iter = std.mem.tokenizeAny(u8, s, ":-");
+    while (iter.next()) |token| {
+        if (byte_idx >= 6) return null;
+        if (token.len < 1 or token.len > 2) return null;
+        const val = std.fmt.parseInt(u8, token, 16) catch return null;
+        mac[byte_idx] = val;
+        byte_idx += 1;
+    }
+    if (byte_idx != 6) return null;
+    return mac;
+}
+
+/// Format a MAC address into "aa:bb:cc:dd:ee:ff" lowercase string.
+pub fn formatMac(buf: *[17]u8, mac: [6]u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+    }) catch "00:00:00:00:00:00";
+}
+
+/// Parse one neighbour-table line into an ArpEntry (IP, optional MAC, and reachability).
 ///
 /// Understands three formats:
 ///   `arp -a` (macOS/Linux): "? (192.168.1.1) at 10:e6:... on en0 ..."
 ///   `arp -a` (Windows):     "  192.168.0.1  64-fa-2b-b0-93-f1  dynamic"
 ///   `ip neigh` (Linux):     "192.168.1.1 dev eth0 lladdr 10:e6:... REACHABLE"
 /// Returns null for dead entries (incomplete/FAILED), header lines,
-/// multicast rows and anything unparseable. Harvested candidates are
-/// ping-verified before being reported, so an occasional stray row
-/// (e.g. a directed broadcast) is harmless.
-pub fn parseArpLine(line: []const u8) ?[4]u8 {
+/// multicast rows and anything unparseable.
+pub fn parseArpEntry(line: []const u8) ?ArpEntry {
     const trimmed = std.mem.trim(u8, line, " \t\r");
     if (trimmed.len == 0) return null;
     if (std.mem.indexOf(u8, trimmed, "incomplete") != null) return null;
     if (std.mem.indexOf(u8, trimmed, "FAILED") != null) return null;
+
     // `arp -a` on macOS/Linux puts the address in parentheses ...
     if (std.mem.indexOfScalar(u8, trimmed, '(')) |open| {
         const close = std.mem.indexOfScalarPos(u8, trimmed, open, ')') orelse return null;
         const ip = ipStringToBytes(trimmed[open + 1 .. close]) catch return null;
-        return if (ip[0] >= 224) null else ip;
+        if (ip[0] >= 224) return null;
+
+        var mac: ?[6]u8 = null;
+        if (std.mem.indexOfPos(u8, trimmed, close, " at ")) |at_pos| {
+            const rest = std.mem.trimStart(u8, trimmed[at_pos + 4 ..], " \t");
+            const mac_end = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+            mac = parseMac(rest[0..mac_end]);
+        }
+        return ArpEntry{ .ip = ip, .mac = mac, .is_reachable = false };
     }
-    // ... while Windows `arp -a` rows and `ip neigh` both lead with
-    // it, so the first whitespace-separated token is the address.
-    // Header lines ("Interface: ...", "Internet Address ...") fail to
-    // parse as an IP and fall out here.
-    const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
-    const ip = ipStringToBytes(trimmed[0..end]) catch return null;
-    // Multicast and reserved ranges are never LAN hosts.
+
+    // Linux `ip neigh` has " lladdr " and reachability states (REACHABLE, DELAY, STALE, etc.)
+    if (std.mem.indexOf(u8, trimmed, " lladdr ")) |lladdr_pos| {
+        const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
+        const ip = ipStringToBytes(trimmed[0..end]) catch return null;
+        if (ip[0] >= 224) return null;
+
+        const rest = std.mem.trimStart(u8, trimmed[lladdr_pos + 8 ..], " \t");
+        const mac_end = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+        const mac = parseMac(rest[0..mac_end]);
+        const is_reachable = std.mem.indexOf(u8, trimmed, "REACHABLE") != null or
+            std.mem.indexOf(u8, trimmed, "DELAY") != null;
+        return ArpEntry{ .ip = ip, .mac = mac, .is_reachable = is_reachable };
+    }
+
+    // Windows `arp -a` rows lead with IP, followed by physical address
+    var tokens = std.mem.tokenizeAny(u8, trimmed, " \t");
+    const ip_token = tokens.next() orelse return null;
+    const ip = ipStringToBytes(ip_token) catch return null;
     if (ip[0] >= 224) return null;
-    return ip;
+
+    var mac: ?[6]u8 = null;
+    if (tokens.next()) |mac_token| {
+        mac = parseMac(mac_token);
+    }
+    return ArpEntry{ .ip = ip, .mac = mac };
+}
+
+/// Parse one neighbour-table line into an IP address.
+pub fn parseArpLine(line: []const u8) ?[4]u8 {
+    const entry = parseArpEntry(line) orelse return null;
+    return entry.ip;
 }

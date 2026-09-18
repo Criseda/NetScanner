@@ -11,6 +11,14 @@ const builtin = @import("builtin");
 const Thread = std.Thread;
 const utils = @import("utils.zig");
 const c_bindings = @import("bindings");
+const oui = @import("oui.zig");
+const resolver = @import("resolver.zig");
+
+pub const NetworkScanOptions = struct {
+    resolve_hostname: bool = false,
+    resolve_vendor: bool = false,
+    oui_file: ?[]const u8 = null,
+};
 
 /// How many port-scan workers run at once. One fixed worker per
 /// thread, each pulling the next port from a shared counter, so a
@@ -304,6 +312,8 @@ const Discovery = struct {
     stdout_mutex: *std.Io.Mutex,
     found: *std.ArrayList([4]u8),
     found_mutex: *std.Io.Mutex,
+    ip_mac_map: *std.AutoHashMap([4]u8, [6]u8),
+    ip_mac_mutex: *std.Io.Mutex,
 
     /// Record a host as found and print it. The suffix tags how it was
     /// found, e.g. " (arp)" for ARP-harvested hosts, "" otherwise.
@@ -323,6 +333,12 @@ const Discovery = struct {
             if (std.mem.eql(u8, &known, &ip)) return true;
         }
         return false;
+    }
+
+    fn recordMac(self: Discovery, ip: [4]u8, mac: [6]u8) void {
+        self.ip_mac_mutex.lockUncancelable(self.io);
+        defer self.ip_mac_mutex.unlock(self.io);
+        self.ip_mac_map.put(ip, mac) catch return;
     }
 };
 
@@ -398,6 +414,167 @@ fn printSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, found: [][4]u8, elapsed
         out.flush() catch return;
     }
     out.print("{d} {s} up ({d:.1}s)\n", .{ found.len, noun, seconds }) catch {};
+    out.flush() catch {};
+}
+
+pub const HostDetail = struct {
+    ip: [4]u8,
+    hostname: ?[]const u8 = null,
+    mac: ?[6]u8 = null,
+    vendor: ?[]const u8 = null,
+};
+
+fn printDetailedSummary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout_mutex: *std.Io.Mutex,
+    found: [][4]u8,
+    ip_mac_map: *std.AutoHashMap([4]u8, [6]u8),
+    options: NetworkScanOptions,
+    elapsed_ns: i96,
+) void {
+    std.mem.sort([4]u8, found, {}, ipLessThan);
+
+    // Initialize OUI database at function scope so custom vendor strings stay alive through printing.
+    var oui_db = oui.OuiDatabase.init(allocator);
+    defer oui_db.deinit();
+
+    var details = allocator.alloc(HostDetail, found.len) catch return;
+    // Pre-initialize fields to safe defaults (null pointers) immediately upon allocation.
+    // This ensures the defer cleanup block never reads uninitialized pointers if an early
+    // exit or panic occurs while populating host details.
+    for (details) |*d| {
+        d.* = .{
+            .ip = undefined,
+            .mac = null,
+            .hostname = null,
+            .vendor = null,
+        };
+    }
+    defer {
+        for (details) |d| {
+            if (d.hostname) |h| allocator.free(h);
+        }
+        allocator.free(details);
+    }
+
+    for (found, 0..) |ip, i| {
+        var mac = ip_mac_map.get(ip);
+        // Fall back to SendARP on Windows for any missing MAC addresses (e.g. localhost)
+        // when vendor resolution is requested.
+        if (mac == null and options.resolve_vendor) {
+            var ip_buf: [16]u8 = undefined;
+            if (std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] })) |ip_str| {
+                mac = c_bindings.getMacSendArp(ip_str.ptr);
+            } else |_| {}
+        }
+        details[i] = HostDetail{
+            .ip = ip,
+            .mac = mac,
+        };
+    }
+
+    // Resolve vendors if requested
+    if (options.resolve_vendor) {
+        if (options.oui_file) |fpath| {
+            oui_db.loadFile(fpath) catch |err| {
+                std.debug.print("warning: failed to load oui file '{s}': {}\n", .{ fpath, err });
+            };
+        }
+        for (details) |*d| {
+            if (d.mac) |mac| {
+                d.vendor = oui_db.lookup(mac);
+            }
+        }
+    }
+
+    // Resolve hostnames in parallel if requested
+    if (options.resolve_hostname and details.len > 0) {
+        const Job = struct {
+            allocator: std.mem.Allocator,
+            details: []HostDetail,
+            next: *std.atomic.Value(usize),
+        };
+        var next_idx: std.atomic.Value(usize) = .init(0);
+        const job = Job{
+            .allocator = allocator,
+            .details = details,
+            .next = &next_idx,
+        };
+        const worker = struct {
+            fn run(j: Job) void {
+                while (true) {
+                    const idx = j.next.fetchAdd(1, .monotonic);
+                    if (idx >= j.details.len) break;
+                    j.details[idx].hostname = resolver.resolveHostName(j.allocator, j.details[idx].ip);
+                }
+            }
+        }.run;
+
+        const worker_count = @min(details.len, 16);
+        var threads: std.ArrayList(Thread) = .empty;
+        defer {
+            for (threads.items) |t| t.join();
+            threads.deinit(allocator);
+        }
+        for (0..worker_count) |_| {
+            if (Thread.spawn(.{}, worker, .{job})) |t| {
+                threads.append(allocator, t) catch {
+                    t.join();
+                    break;
+                };
+            } else |_| break;
+        }
+        if (threads.items.len == 0) {
+            // Fallback: execute synchronously if thread spawning fails or system is single-threaded
+            worker(job);
+        }
+    }
+
+    const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    const noun: []const u8 = if (details.len == 1) "host" else "hosts";
+
+    stdout_mutex.lockUncancelable(io);
+    defer stdout_mutex.unlock(io);
+    var buf: [2048]u8 = undefined;
+    var writer: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    const out = &writer.interface;
+
+    var ip_str_buf: [16]u8 = undefined;
+    var mac_str_buf: [17]u8 = undefined;
+
+    if (details.len > 0) {
+        if (options.resolve_hostname and options.resolve_vendor) {
+            out.print("{s: <17}{s: <26}{s: <19}{s}\n", .{ "IP", "HOSTNAME", "MAC", "MANUFACTURER" }) catch return;
+            for (details) |d| {
+                const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+                const h_str = d.hostname orelse "-";
+                const mac_str = if (d.mac) |m| utils.formatMac(&mac_str_buf, m) else "-";
+                const v_str = d.vendor orelse "-";
+                out.print("{s: <17}{s: <26}{s: <19}{s}\n", .{ ip_str, h_str, mac_str, v_str }) catch return;
+                out.flush() catch return;
+            }
+        } else if (options.resolve_hostname) {
+            out.print("{s: <17}{s}\n", .{ "IP", "HOSTNAME" }) catch return;
+            for (details) |d| {
+                const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+                const h_str = d.hostname orelse "-";
+                out.print("{s: <17}{s}\n", .{ ip_str, h_str }) catch return;
+                out.flush() catch return;
+            }
+        } else if (options.resolve_vendor) {
+            out.print("{s: <17}{s: <19}{s}\n", .{ "IP", "MAC", "MANUFACTURER" }) catch return;
+            for (details) |d| {
+                const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+                const mac_str = if (d.mac) |m| utils.formatMac(&mac_str_buf, m) else "-";
+                const v_str = d.vendor orelse "-";
+                out.print("{s: <17}{s: <19}{s}\n", .{ ip_str, mac_str, v_str }) catch return;
+                out.flush() catch return;
+            }
+        }
+    }
+
+    out.print("{d} {s} up ({d:.1}s)\n", .{ details.len, noun, seconds }) catch {};
     out.flush() catch {};
 }
 
@@ -482,7 +659,12 @@ fn pingSweep(allocator: std.mem.Allocator, io: std.Io, ips: []const [4]u8) ![]bo
 
 /// Slow path: ICMP ping sweep. Kept as a fallback for networks where
 /// TCP probing is filtered; prefer scanNetwork.
-pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
+pub fn scanNetworkPing(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cidr: []const u8,
+    options: NetworkScanOptions,
+) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
 
@@ -509,8 +691,26 @@ pub fn scanNetworkPing(allocator: std.mem.Allocator, io: std.Io, cidr: []const u
         });
     }
 
+    var ip_mac_map = std.AutoHashMap([4]u8, [6]u8).init(allocator);
+    defer ip_mac_map.deinit();
+
+    if (dumpArpTable(allocator, io)) |table| {
+        defer allocator.free(table);
+        var lines = std.mem.splitScalar(u8, table, '\n');
+        while (lines.next()) |line| {
+            const entry = utils.parseArpEntry(line) orelse continue;
+            if (entry.mac) |mac| {
+                ip_mac_map.put(entry.ip, mac) catch continue;
+            }
+        }
+    }
+
     const elapsed = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
-    printSummary(io, &stdout_mutex, found.items, elapsed);
+    if (options.resolve_hostname or options.resolve_vendor) {
+        printDetailedSummary(allocator, io, &stdout_mutex, found.items, &ip_mac_map, options, elapsed);
+    } else {
+        printSummary(io, &stdout_mutex, found.items, elapsed);
+    }
 }
 
 /// Ping one host through the C helper. Returns true when it answers.
@@ -547,7 +747,12 @@ const TCP_PROBE_PORT = 80;
 /// devices that ignore TCP, then ping each harvest-only candidate
 /// once before reporting it -- ARP entries linger after hosts leave,
 /// so a complete entry alone is not proof.
-pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !void {
+pub fn scanNetwork(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cidr: []const u8,
+    options: NetworkScanOptions,
+) !void {
     const network = try utils.parseCidr(cidr);
     const ip_range = try utils.getIpRange(network);
 
@@ -560,12 +765,18 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
     var found: std.ArrayList([4]u8) = .empty;
     defer found.deinit(allocator);
     var found_mutex: std.Io.Mutex = .init;
+    var ip_mac_map = std.AutoHashMap([4]u8, [6]u8).init(allocator);
+    defer ip_mac_map.deinit();
+    var ip_mac_mutex: std.Io.Mutex = .init;
+
     const shares = Discovery{
         .io = io,
         .allocator = allocator,
         .stdout_mutex = &stdout_mutex,
         .found = &found,
         .found_mutex = &found_mutex,
+        .ip_mac_map = &ip_mac_map,
+        .ip_mac_mutex = &ip_mac_mutex,
     };
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
@@ -574,7 +785,11 @@ pub fn scanNetwork(allocator: std.mem.Allocator, io: std.Io, cidr: []const u8) !
     harvestArp(shares, hosts.start, hosts.end);
 
     const elapsed = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
-    printSummary(io, &stdout_mutex, found.items, elapsed);
+    if (options.resolve_hostname or options.resolve_vendor) {
+        printDetailedSummary(allocator, io, &stdout_mutex, found.items, &ip_mac_map, options, elapsed);
+    } else {
+        printSummary(io, &stdout_mutex, found.items, elapsed);
+    }
 }
 
 fn tcpWorker(shares: Discovery, ip: [4]u8) void {
@@ -597,17 +812,30 @@ fn tcpProbe(ip: [4]u8) bool {
 /// alone is not proof. Needs no privileges; `arp -a` exists on macOS,
 /// Linux and Windows, and all three table formats are parsed.
 fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
-    const table = readArpTable(shares) orelse return;
+    const table = dumpArpTable(shares.allocator, shares.io) orelse return;
     defer shares.allocator.free(table);
 
     var candidates: std.ArrayList([4]u8) = .empty;
     defer candidates.deinit(shares.allocator);
     var lines = std.mem.splitScalar(u8, table, '\n');
     while (lines.next()) |line| {
-        const ip = utils.parseArpLine(line) orelse continue;
-        if (!utils.ipInRange(ip, first_ip, last_ip)) continue;
-        if (shares.isFound(ip)) continue;
-        candidates.append(shares.allocator, ip) catch continue;
+        const entry = utils.parseArpEntry(line) orelse continue;
+        if (entry.mac) |mac| {
+            shares.recordMac(entry.ip, mac);
+        }
+        if (!utils.ipInRange(entry.ip, first_ip, last_ip)) continue;
+        if (shares.isFound(entry.ip)) continue;
+
+        // If the OS kernel's neighbor table explicitly marks this entry as actively
+        // REACHABLE or in DELAY state (e.g. Linux `ip neigh`), the kernel has recently
+        // exchanged packets with this host and confirmed its Layer 2 presence. We can
+        // report it immediately without waiting on an ICMP ping.
+        if (entry.is_reachable) {
+            shares.reportHost(entry.ip, " (arp)");
+            continue;
+        }
+
+        candidates.append(shares.allocator, entry.ip) catch continue;
     }
     if (candidates.items.len == 0) return;
 
@@ -615,8 +843,67 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     // "(arp)" report.
     const alive = pingSweep(shares.allocator, shares.io, candidates.items) catch return;
     defer shares.allocator.free(alive);
+    var unconfirmed: std.ArrayList([4]u8) = .empty;
+    defer unconfirmed.deinit(shares.allocator);
+
     for (candidates.items, alive) |ip, is_up| {
-        if (is_up) shares.reportHost(ip, " (arp)");
+        if (is_up) {
+            shares.reportHost(ip, " (arp)");
+        } else {
+            unconfirmed.append(shares.allocator, ip) catch continue;
+        }
+    }
+
+    if (unconfirmed.items.len == 0) return;
+
+    // For unconfirmed candidates that dropped ICMP ping (e.g. firewalled IoT,
+    // GL.iNet, TP-Link smart plugs), verify live Layer 2 presence via SendARP on Windows.
+    if (comptime builtin.os.tag == .windows) {
+        const ArpJob = struct {
+            shares: Discovery,
+            targets: [][4]u8,
+            next: *std.atomic.Value(usize),
+        };
+        var next_idx: std.atomic.Value(usize) = .init(0);
+        const job = ArpJob{
+            .shares = shares,
+            .targets = unconfirmed.items,
+            .next = &next_idx,
+        };
+        const arp_worker = struct {
+            fn run(j: ArpJob) void {
+                while (true) {
+                    const idx = j.next.fetchAdd(1, .monotonic);
+                    if (idx >= j.targets.len) break;
+                    const ip = j.targets[idx];
+                    var ip_buf: [16]u8 = undefined;
+                    const ip_str = std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch continue;
+                    if (c_bindings.getMacSendArp(ip_str.ptr)) |mac| {
+                        j.shares.recordMac(ip, mac);
+                        j.shares.reportHost(ip, " (arp)");
+                    }
+                }
+            }
+        }.run;
+
+        const worker_count = @min(unconfirmed.items.len, 8);
+        var threads: std.ArrayList(Thread) = .empty;
+        defer {
+            for (threads.items) |t| t.join();
+            threads.deinit(shares.allocator);
+        }
+        for (0..worker_count) |_| {
+            if (Thread.spawn(.{}, arp_worker, .{job})) |t| {
+                threads.append(shares.allocator, t) catch {
+                    t.join();
+                    break;
+                };
+            } else |_| break;
+        }
+        if (threads.items.len == 0) {
+            // Fallback: execute synchronously if thread spawning fails or system is single-threaded
+            arp_worker(job);
+        }
     }
 }
 
@@ -624,13 +911,13 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
 /// `ip neigh show` (minimal Linux distros often lack net-tools).
 /// Returns the output for the caller to free, or null when neither
 /// tool exists -- then discovery just ends after the TCP sweep.
-fn readArpTable(shares: Discovery) ?[]u8 {
+pub fn dumpArpTable(allocator: std.mem.Allocator, io: std.Io) ?[]u8 {
     const commands = [_][]const []const u8{
         &.{ "arp", "-a" },
         &.{ "ip", "neigh", "show" },
     };
     for (commands) |argv| {
-        const result = std.process.run(shares.allocator, shares.io, .{ .argv = argv }) catch |err| {
+        const result = std.process.run(allocator, io, .{ .argv = argv }) catch |err| {
             // Missing tool: try the next one. Anything else is a real
             // failure, so stop instead of running stranger commands.
             if (err != error.FileNotFound) {
@@ -639,7 +926,7 @@ fn readArpTable(shares: Discovery) ?[]u8 {
             }
             continue;
         };
-        shares.allocator.free(result.stderr);
+        allocator.free(result.stderr);
         return result.stdout;
     }
     std.debug.print("arp harvest skipped: neither `arp` nor `ip` found\n", .{});
