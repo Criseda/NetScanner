@@ -20,7 +20,7 @@ pub fn printUsage(io: std.Io) !void {
         \\
         \\Usage:
         \\
-        \\ns -p <ip> <port-range>    Scan one IP for open ports (example: 192.168.1.1 1-1024)
+        \\ns -p <ip> <port-range> [--timeout <ms>]    Scan one IP for open ports (example: 192.168.1.1 1-1024)
         \\ns -s <subnet> [--ping]    Find live hosts in a subnet (example: 192.168.0.1/24)
         \\                           Default is fast TCP + ARP discovery; --ping uses ICMP instead
         \\ns --help                  Display this help message
@@ -33,7 +33,7 @@ pub fn printUsage(io: std.Io) !void {
 }
 
 pub fn printVersion(io: std.Io) !void {
-    const version = "v1.0.0";
+    const version = "v1.1.0";
     var buf: [64]u8 = undefined;
     var w = stdoutWriter(io, &buf);
     try w.interface.print("{s}\n", .{version});
@@ -55,17 +55,19 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
     var ip_bytes: [4]u8 = undefined;
     var byte: u8 = 0;
     var byte_index: u8 = 0;
+    var has_digits = false;
     var ip_string_index: usize = 0;
 
     while (ip_string_index < ip_string.len) : (ip_string_index += 1) {
         const char = ip_string[ip_string_index];
         if (char == '.') {
-            if (byte_index >= 4) {
+            if (byte_index >= 4 or !has_digits) {
                 return error.InvalidIpAddress;
             }
             ip_bytes[byte_index] = byte;
             byte = 0;
             byte_index += 1;
+            has_digits = false;
             continue;
         }
         if (char < '0' or char > '9') {
@@ -77,9 +79,10 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
             return error.InvalidIpAddress;
         }
         byte = byte * 10 + digit;
+        has_digits = true;
     }
 
-    if (byte_index != 3) {
+    if (byte_index != 3 or !has_digits) {
         return error.InvalidIpAddress;
     }
     ip_bytes[byte_index] = byte;
@@ -149,6 +152,7 @@ pub fn getIpRange(network: Network) !IpRange {
 }
 
 fn computeMask(prefix_len: u8) u32 {
+    if (prefix_len == 0) return 0;
     if (prefix_len == 32) {
         return 0xFFFFFFFF;
     } else {

@@ -28,7 +28,9 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// `ns -p <ip> <port-range>`: scan one host for open ports.
+/// `ns -p <ip> <port-range> [--timeout <ms>]`: scan one host for
+/// open ports. The timeout caps each probe (default 500ms); raise it
+/// on slow networks, lower it on fast LANs for quicker sweeps.
 fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     if (args.len < 4) {
         try utils.printUsage(io);
@@ -49,7 +51,9 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
         defer allocator.free(port_array);
         return;
     }
-    // Accept the range in either order.
+    // Accept the range in either order. scanPorts itself rejects
+    // reversed ranges (error.InvalidPortRange); the CLI normalizes
+    // first so users never have to care which side is larger.
     if (port_array[0] > port_array[1]) {
         const temp = port_array[0];
         port_array[0] = port_array[1];
@@ -57,9 +61,40 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
     }
     defer allocator.free(port_array);
 
+    // Optional `--timeout <ms>` after the range.
+    var timeout_ms: ?u16 = null;
+    var arg_i: usize = 4;
+    while (arg_i < args.len) : (arg_i += 1) {
+        if (!std.mem.eql(u8, args[arg_i], "--timeout")) {
+            std.debug.print("NetScanner: Unknown option\n", .{});
+            return;
+        }
+        arg_i += 1;
+        if (arg_i >= args.len) {
+            std.debug.print("NetScanner: --timeout needs a value in milliseconds (1-60000)\n", .{});
+            return;
+        }
+        const parsed = std.fmt.parseInt(u16, args[arg_i], 10) catch {
+            std.debug.print("NetScanner: Invalid timeout\n", .{});
+            return;
+        };
+        if (parsed == 0 or parsed > 60000) {
+            std.debug.print("NetScanner: Timeout must be 1-60000 ms\n", .{});
+            return;
+        }
+        timeout_ms = parsed;
+    }
+
     const ip_address = [4]u8{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] };
 
-    var open_ports = try scanner.scanPorts(allocator, io, ip_address, port_array[0], port_array[1]);
+    var open_ports = try scanner.scanPorts(
+        allocator,
+        io,
+        ip_address,
+        port_array[0],
+        port_array[1],
+        .{ .timeout_ms = timeout_ms },
+    );
     defer open_ports.deinit(allocator);
 
     var stdout_mutex: std.Io.Mutex = .init;

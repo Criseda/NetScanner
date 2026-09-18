@@ -14,6 +14,18 @@ test "ipStringToBytes rejects invalid IP address formats" {
     try std.testing.expectError(error.InvalidIpAddress, utils.ipStringToBytes("abc.def.ghi.jkl"));
 }
 
+test "ipStringToBytes rejects empty octets" {
+    const bad = [_][]const u8{ "", ".", "...", ".168.0.1", "192..0.1", "192.168..1", "192.168.0.", "192.168.0.1." };
+    for (bad) |input| {
+        try std.testing.expectError(error.InvalidIpAddress, utils.ipStringToBytes(input));
+    }
+}
+
+test "ipStringToBytes accepts zero octets" {
+    const result = try utils.ipStringToBytes("0.0.0.0");
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 0, 0, 0, 0 }, &result);
+}
+
 test "ipBytesToString converts bytes to string correctly" {
     const ip: [4]u8 = [4]u8{ 192, 168, 0, 1 };
     const allocator = std.testing.allocator;
@@ -70,6 +82,20 @@ test "getIpRange calculates correct range" {
 
     try std.testing.expectEqualSlices(u8, &expected_start, &range.start);
     try std.testing.expectEqualSlices(u8, &expected_end, &range.end);
+}
+
+test "getIpRange handles zero prefix" {
+    const network = try utils.parseCidr("192.168.1.1/0");
+    const range = try utils.getIpRange(network);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 0, 0, 0, 0 }, &range.start);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 255, 255, 255, 255 }, &range.end);
+}
+
+test "getIpRange handles full prefix" {
+    const network = try utils.parseCidr("192.168.1.1/32");
+    const range = try utils.getIpRange(network);
+    try std.testing.expectEqualSlices(u8, &network.address, &range.start);
+    try std.testing.expectEqualSlices(u8, &network.address, &range.end);
 }
 
 test "incrementIP increments IP address correctly" {
