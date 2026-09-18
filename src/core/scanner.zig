@@ -66,15 +66,15 @@ pub fn tcpConnect(ip: [4]u8, port: u16) ProbeOutcome {
     return tcpConnectTimeout(ip, port, CONNECT_TIMEOUT_MS);
 }
 
-/// Connect to ip:port, waiting at most PORT_TIMEOUT_MS. This is the
+/// Connect to ip:port, waiting at most timeout_ms. This is the
 /// port-scan verdict ("is this port open?"): only open matters, while
 /// refused and filtered both mean "not open" and stay silent in the
 /// scan output.
-pub fn tcpConnectPort(ip: [4]u8, port: u16) ProbeOutcome {
+pub fn tcpConnectPort(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
     if (comptime builtin.os.tag == .windows) {
-        return tcpConnectWinsock(ip, port, PORT_TIMEOUT_MS);
+        return tcpConnectWinsock(ip, port, timeout_ms);
     }
-    return tcpConnectTimeout(ip, port, PORT_TIMEOUT_MS);
+    return tcpConnectTimeout(ip, port, timeout_ms);
 }
 
 /// Windows connect with our own timeout, via the C Winsock helper.
@@ -145,7 +145,9 @@ fn tcpConnectTimeout(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
 // ---------------------------------------------------------------------------
 
 /// Scan start_port..end_port (inclusive) on one IP and return the
-/// open ports, sorted ascending.
+/// open ports, sorted ascending. Callers pass start_port <= end_port
+/// (the CLI swaps reversed ranges itself); anything else is
+/// error.InvalidPortRange.
 ///
 /// A fixed pool of workers pulls ports from a shared atomic counter:
 /// no thread-per-port, no sleeps, no per-port stderr. Only open ports
@@ -157,6 +159,11 @@ pub const ScanOptions = struct {
     /// running under `zig build test` speak the build protocol over
     /// stdout and stray writes hang the runner.
     progress: bool = true,
+    /// Per-probe wait cap in milliseconds. Null selects
+    /// PORT_TIMEOUT_MS. Exposed as `ns -p ... --timeout <ms>` for
+    /// unusually slow networks; lower it on a fast LAN for even
+    /// quicker sweeps.
+    timeout_ms: ?u16 = null,
 };
 
 pub fn scanPorts(
@@ -168,6 +175,25 @@ pub fn scanPorts(
     options: ScanOptions,
 ) !std.ArrayList(u16) {
     if (start_port > end_port) return error.InvalidPortRange;
+
+    // One wait cap for every probe in this scan: the explicit
+    // override when given, PORT_TIMEOUT_MS otherwise.
+    const timeout_ms: c_int = if (options.timeout_ms) |t| t else PORT_TIMEOUT_MS;
+
+    if (start_port == end_port) {
+        // One port needs no pool: probe it directly instead of
+        // spawning a worker thread for a single connect.
+        var open_ports: std.ArrayList(u16) = .empty;
+        errdefer open_ports.deinit(allocator);
+        if (tcpConnectPort(ip_address, start_port, timeout_ms) == .open) {
+            if (options.progress) {
+                var stdout_mutex: std.Io.Mutex = .init;
+                utils.printStdout(io, &stdout_mutex, "Open port: {}\n", .{start_port});
+            }
+            try open_ports.append(allocator, start_port);
+        }
+        return open_ports;
+    }
 
     var open_ports: std.ArrayList(u16) = .empty;
     errdefer open_ports.deinit(allocator);
@@ -204,6 +230,7 @@ pub fn scanPorts(
         .ports_mutex = &ports_mutex,
         .stdout_mutex = &stdout_mutex,
         .progress = options.progress,
+        .timeout_ms = timeout_ms,
     };
     for (0..worker_count) |_| {
         const t = try Thread.spawn(.{}, portWorker, .{shares});
@@ -237,6 +264,7 @@ const PortShares = struct {
     ports_mutex: *std.Io.Mutex,
     stdout_mutex: *std.Io.Mutex,
     progress: bool,
+    timeout_ms: c_int,
 };
 
 /// Pull the next port until the range is exhausted. Only open ports
@@ -248,7 +276,7 @@ fn portWorker(shares: PortShares) void {
         const port_num = shares.next_port.fetchAdd(1, .monotonic);
         if (port_num > shares.end) break;
         const port: u16 = @intCast(port_num);
-        if (tcpConnectPort(shares.ip, port) != .open) continue;
+        if (tcpConnectPort(shares.ip, port, shares.timeout_ms) != .open) continue;
         if (shares.progress) {
             utils.printStdout(shares.io, shares.stdout_mutex, "Open port: {}\n", .{port});
         }

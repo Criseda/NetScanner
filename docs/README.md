@@ -24,7 +24,7 @@ file is the full guide.
 
 ```sh
 ns -s <subnet> [--ping]    # Find live hosts (example: 192.168.0.1/24)
-ns -p <ip> <port-range>    # Scan one host for open ports (example: 192.168.1.1 1-1024)
+ns -p <ip> <port-range> [--timeout <ms>]    # Scan one host for open ports (example: 192.168.1.1 1-1024)
 ns --help                  # Display help message
 ns --version               # Display version
 ```

@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const scanner = @import("core").scanner;
-const utils = @import("core").utils;
 
 // This is a simple test to ensure the scanner module can be imported
 test "scanner module imports correctly" {
@@ -26,10 +25,14 @@ test "tcpConnect maps an unroutable host to filtered" {
 test "tcpConnectPort maps an unroutable host to filtered" {
     // Same TEST-NET-1 reasoning as above, through the shorter
     // port-scan timeout instead of the discovery one.
-    const outcome = scanner.tcpConnectPort(.{ 192, 0, 2, 1 }, 80);
+    const outcome = scanner.tcpConnectPort(.{ 192, 0, 2, 1 }, 80, 500);
     try std.testing.expectEqual(scanner.ProbeOutcome.filtered, outcome);
 }
 
+// NOTE: progress=true (the CLI default) has no automated test on
+// purpose: under `zig build test` the runner speaks its protocol
+// over stdout, so test output there hangs the run. Streaming output
+// is verified manually against the built binary instead.
 test "scanPorts rejects a reversed range" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const result = scanner.scanPorts(
@@ -72,6 +75,28 @@ test "scanPorts finds a locally bound open port" {
         bound.port,
         bound.port,
         .{ .progress = false },
+    );
+    defer open.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), open.items.len);
+    try std.testing.expectEqual(bound.port, open.items[0]);
+}
+
+test "scanPorts honors a custom timeout override" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const io = std.testing.io;
+
+    // An open loopback port answers far inside 50ms, so the override
+    // proves the plumbing without timing assertions (which flake).
+    var bound = bindLoopbackAbove(io, 48431, 20) orelse return error.SkipZigTest;
+    defer bound.server.deinit(io);
+
+    var open = try scanner.scanPorts(
+        std.testing.allocator,
+        io,
+        .{ 127, 0, 0, 1 },
+        bound.port,
+        bound.port,
+        .{ .progress = false, .timeout_ms = 50 },
     );
     defer open.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), open.items.len);

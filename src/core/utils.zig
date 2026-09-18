@@ -20,7 +20,7 @@ pub fn printUsage(io: std.Io) !void {
         \\
         \\Usage:
         \\
-        \\ns -p <ip> <port-range>    Scan one IP for open ports (example: 192.168.1.1 1-1024)
+        \\ns -p <ip> <port-range> [--timeout <ms>]    Scan one IP for open ports (example: 192.168.1.1 1-1024)
         \\ns -s <subnet> [--ping]    Find live hosts in a subnet (example: 192.168.0.1/24)
         \\                           Default is fast TCP + ARP discovery; --ping uses ICMP instead
         \\ns --help                  Display this help message

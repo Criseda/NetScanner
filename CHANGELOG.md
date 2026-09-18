@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+Port scanning is faster and quieter, with no new privileges required:
+
+- Fixed worker pools replace thread-per-port (and thread-per-IP in
+  discovery): a full 65k range needs hundreds of threads instead of
+  tens of thousands. A 200-port loopback scan drops from about 4.2s
+  to about 0.6s on Windows.
+- Port probes use a dedicated 500ms timeout while discovery keeps its
+  longer Windows bound, so slow RSTs still count as host-up.
+  Override it per scan with `ns -p <ip> <range> --timeout <ms>`.
+- Results are sorted ascending; reversed ranges are rejected
+  (`InvalidPortRange`, the CLI still accepts either order); the
+  silent port-137 skip, the per-port sleep, per-port filtered stderr
+  lines, and a leftover TEMP timing print are gone.
+- `ipStringToBytes` rejects empty octets and `/0` CIDRs no longer
+  overflow the mask computation.
+
 ## v1.0.0
 
 First stable release: reliable no-root LAN discovery plus port
