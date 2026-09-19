@@ -1,6 +1,6 @@
 # NetScanner
 
-![Version](https://img.shields.io/badge/Version-v1.2.0-red)
+![Version](https://img.shields.io/badge/Version-v1.2.1-red)
 ![Language](https://img.shields.io/badge/Language-0.16.0-orange?logo=zig&logoSize=auto)
 ![OS](https://img.shields.io/badge/OS-Linux%2C%20MacOS%2C%20Windows-blue)
 ![License](https://img.shields.io/badge/License-GNU%20GPL--3.0-green)
@@ -49,12 +49,12 @@ ns -s 192.168.0.0/24 --resolve
 Output:
 ```text
 IP               HOSTNAME                  MAC                MANUFACTURER
-192.168.0.1      -                         64:fa:2b:b0:93:f1  Sagemcom Broadband SAS
-192.168.0.17     DRAGONAS                  00:11:32:4f:c2:75  Synology Incorporated
-192.168.0.30     LAURPI                    2c:cf:67:89:ea:27  Raspberry Pi (Trading) Ltd
-192.168.0.39     Laur-PC                   9c:6b:00:42:1d:a6  ASRock Incorporation
-192.168.0.153    ecb5fa31ae69              ec:b5:fa:31:ae:69  Philips Lighting BV
-192.168.0.167    PS5-8ADCDF                5c:96:66:8a:dc:df  Sony Interactive Entertainment Inc.
+192.168.1.1      gateway                   00:50:56:a1:b2:c3  VMware, Inc.
+192.168.1.10     nas-storage               00:11:32:11:22:33  Synology Incorporated
+192.168.1.25     raspberrypi               2c:cf:67:aa:bb:cc  Raspberry Pi (Trading) Ltd
+192.168.1.42     workstation               70:85:c2:44:55:66  ASRock Incorporation
+192.168.1.105    smart-light               ec:b5:fa:01:02:03  Philips Lighting BV
+192.168.1.140    game-console              fc:ca:40:77:88:99  Sony Interactive Entertainment Inc.
 ```
 
 ## Docs

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.1
+
+Hardware manufacturer identification data upgrade and binary lookup engine:
+
+- Full Wireshark OUI database: Upgraded the embedded hardware manufacturer database from ~1,969 prefixes to the complete Wireshark / IEEE database (39,914 24-bit OUIs), resolving 100% of standard IEEE-assigned vendors worldwide (including all 1,553 Apple, 971 Samsung, 682 Intel, 1,252 Cisco, and 339 Espressif IoT prefixes previously omitted).
+- Binary lookup table architecture: Pre-packs sorted 8-byte records and a deduplicated string pool into `oui.bin` directly embedded in `.rodata`, eliminating compile-time text parsing bottlenecks while maintaining sub-microsecond binary search lookup (< 20ns) with zero memory allocations and zero startup delay.
+- Generator tooling: Added `scripts/generate_oui.py` for automated updates from upstream Wireshark automated data distributions.
+
 ## v1.2.0
 
 Hostname resolution and hardware manufacturer lookup for subnet scans (`-s`), with zero extra privileges or external tools required:

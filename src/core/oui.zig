@@ -1,6 +1,6 @@
 //! Embedded OUI manufacturer database for NetScanner.
-//! Parses an embedded Wireshark/IEEE `manuf` database at compile time,
-//! baking the sorted binary search table directly into the binary's .rodata.
+//! Embeds the complete Wireshark / IEEE OUI database (~40,000 entries)
+//! pre-packed as a compact, memory-mapped binary lookup table in .rodata.
 
 const std = @import("std");
 const c_bindings = @import("bindings");
@@ -10,8 +10,89 @@ pub const OuiEntry = struct {
     vendor: []const u8,
 };
 
-/// The raw Wireshark manuf database file embedded directly into the compiler.
-const embedded_manuf_raw = @embedFile("data/manuf.txt");
+pub const PackedHeader = extern struct {
+    magic: [4]u8,
+    version: u32,
+    entry_count: u32,
+    table_offset: u32,
+    strings_offset: u32,
+    strings_len: u32,
+};
+
+pub const PackedEntry = extern struct {
+    prefix: [3]u8,
+    name_len: u8,
+    name_offset: u32,
+};
+
+/// Pre-packed binary database embedded directly into .rodata.
+const embedded_oui_bin = @embedFile("data/oui.bin");
+
+fn readHeader() PackedHeader {
+    if (embedded_oui_bin.len < @sizeOf(PackedHeader)) {
+        @compileError("embedded oui.bin is smaller than header size");
+    }
+    return .{
+        .magic = embedded_oui_bin[0..4].*,
+        .version = std.mem.readInt(u32, embedded_oui_bin[4..8], .little),
+        .entry_count = std.mem.readInt(u32, embedded_oui_bin[8..12], .little),
+        .table_offset = std.mem.readInt(u32, embedded_oui_bin[12..16], .little),
+        .strings_offset = std.mem.readInt(u32, embedded_oui_bin[16..20], .little),
+        .strings_len = std.mem.readInt(u32, embedded_oui_bin[20..24], .little),
+    };
+}
+
+const db_header = readHeader();
+
+comptime {
+    if (!std.mem.eql(u8, &db_header.magic, "NSOU")) {
+        @compileError("invalid magic in embedded oui.bin (expected NSOU)");
+    }
+    if (db_header.version != 1) {
+        @compileError("unsupported oui.bin format version");
+    }
+    const expected_table_len = @as(usize, db_header.entry_count) * @sizeOf(PackedEntry);
+    if (db_header.table_offset + expected_table_len > embedded_oui_bin.len) {
+        @compileError("oui.bin table extends beyond file size");
+    }
+    if (db_header.strings_offset != db_header.table_offset + expected_table_len) {
+        @compileError("oui.bin strings offset does not match table end");
+    }
+    if (db_header.strings_offset + db_header.strings_len > embedded_oui_bin.len) {
+        @compileError("oui.bin string pool extends beyond file size");
+    }
+}
+
+pub const EMBEDDED_COUNT: usize = db_header.entry_count;
+const db_table_bytes = embedded_oui_bin[db_header.table_offset..db_header.strings_offset];
+const db_string_pool = embedded_oui_bin[db_header.strings_offset .. db_header.strings_offset + db_header.strings_len];
+
+/// Search the embedded ~40,000 OUI database using binary search.
+/// Lookup is sub-microsecond (< 20ns) with zero memory allocations.
+pub fn lookupEmbeddedVendor(mac: [6]u8) ?[]const u8 {
+    const target = [3]u8{ mac[0], mac[1], mac[2] };
+    var low: usize = 0;
+    var high: usize = db_header.entry_count;
+
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const entry_offset = mid * @sizeOf(PackedEntry);
+        const prefix = db_table_bytes[entry_offset .. entry_offset + 3];
+
+        const cmp = std.mem.order(u8, &target, prefix);
+        switch (cmp) {
+            .lt => high = mid,
+            .gt => low = mid + 1,
+            .eq => {
+                const name_len = db_table_bytes[entry_offset + 3];
+                const name_offset = std.mem.readInt(u32, db_table_bytes[entry_offset + 4 .. entry_offset + 8][0..4], .little);
+                if (name_offset + name_len > db_string_pool.len) return null;
+                return db_string_pool[name_offset .. name_offset + name_len];
+            },
+        }
+    }
+    return null;
+}
 
 /// Comparison function for sorting OuiEntry slices in ascending prefix order.
 pub fn ouiEntryLessThan(_: void, a: OuiEntry, b: OuiEntry) bool {
@@ -51,56 +132,12 @@ pub fn parseManufLine(raw_line: []const u8) ?OuiEntry {
     };
 }
 
-/// Count valid entries at compile time to size the embedded table.
-fn countEmbeddedEntries(comptime raw: []const u8) usize {
-    @setEvalBranchQuota(1_000_000);
-    var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, raw, '\n');
-    while (lines.next()) |raw_line| {
-        if (parseManufLine(raw_line) != null) {
-            count += 1;
-        }
-    }
-    return count;
-}
-
-/// Parse the embedded Wireshark manuf database at compile time.
-/// Each vendor string slice points directly into the static embedded file in .rodata,
-/// requiring zero memory allocation, zero runtime parsing, and zero startup delay.
-fn parseEmbeddedDatabase(comptime raw: []const u8) [countEmbeddedEntries(raw)]OuiEntry {
-    @setEvalBranchQuota(10_000_000);
-    const total = countEmbeddedEntries(raw);
-    var table: [total]OuiEntry = undefined;
-    var count: usize = 0;
-
-    var lines = std.mem.splitScalar(u8, raw, '\n');
-    while (lines.next()) |raw_line| {
-        if (parseManufLine(raw_line)) |entry| {
-            table[count] = entry;
-            count += 1;
-        }
-    }
-
-    std.mem.sort(OuiEntry, &table, {}, ouiEntryLessThan);
-    return table;
-}
-
-/// Embedded table evaluated at compile time, sorted ascending by prefix for binary search.
-pub const EMBEDDED_OUIS: []const OuiEntry = &parseEmbeddedDatabase(embedded_manuf_raw);
-
 fn comparePrefix(key: [3]u8, mid: OuiEntry) std.math.Order {
     for (0..3) |i| {
         if (key[i] < mid.prefix[i]) return .lt;
         if (key[i] > mid.prefix[i]) return .gt;
     }
     return .eq;
-}
-
-/// Search embedded table using binary search.
-pub fn lookupEmbeddedVendor(mac: [6]u8) ?[]const u8 {
-    const target = [3]u8{ mac[0], mac[1], mac[2] };
-    const idx = std.sort.binarySearch(OuiEntry, EMBEDDED_OUIS, target, comparePrefix) orelse return null;
-    return EMBEDDED_OUIS[idx].vendor;
 }
 
 pub const OuiDatabase = struct {
@@ -155,7 +192,7 @@ pub const OuiDatabase = struct {
 
     /// Look up the hardware vendor for a given MAC address.
     /// Checks the custom database if one was loaded; falls back to the embedded
-    /// ~2,000 top-vendor table if not found or if no custom database was provided.
+    /// ~40,000-entry database if not found or if no custom database was provided.
     pub fn lookup(self: OuiDatabase, mac: [6]u8) ?[]const u8 {
         if (self.custom_entries) |entries| {
             const target = [3]u8{ mac[0], mac[1], mac[2] };

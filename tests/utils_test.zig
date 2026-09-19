@@ -158,16 +158,16 @@ test "parseArpLine reads macOS and Linux arp -a lines" {
 
 test "parseArpLine reads Windows arp -a lines" {
     // Real rows: dynamic and static entries alike.
-    const dynamic = utils.parseArpLine("  192.168.0.1           64-fa-2b-b0-93-f1     dynamic");
+    const dynamic = utils.parseArpLine("  192.168.1.1           00-11-22-33-44-55     dynamic");
     try std.testing.expect(dynamic != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 0, 1 }, &dynamic.?);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &dynamic.?);
 
-    const stat = utils.parseArpLine("  192.168.0.30          2c-cf-67-89-ea-27     dynamic");
+    const stat = utils.parseArpLine("  192.168.1.50          aa-bb-cc-dd-ee-ff     dynamic");
     try std.testing.expect(stat != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 0, 30 }, &stat.?);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 50 }, &stat.?);
 
     // Headers, blank lines and the empty-table message yield null.
-    try std.testing.expect(utils.parseArpLine("Interface: 192.168.0.39 --- 0x5") == null);
+    try std.testing.expect(utils.parseArpLine("Interface: 192.168.1.100 --- 0x5") == null);
     try std.testing.expect(utils.parseArpLine("  Internet Address      Physical Address      Type") == null);
     try std.testing.expect(utils.parseArpLine("") == null);
     try std.testing.expect(utils.parseArpLine("No ARP Entries Found.") == null);
@@ -207,17 +207,17 @@ test "collectIps expands a range inclusively" {
 }
 
 test "parseMac and formatMac" {
-    const mac_colon = utils.parseMac("64:fa:2b:b0:93:f1");
+    const mac_colon = utils.parseMac("00:11:22:33:44:55");
     try std.testing.expect(mac_colon != null);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x64, 0xfa, 0x2b, 0xb0, 0x93, 0xf1 }, &mac_colon.?);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 }, &mac_colon.?);
 
-    const mac_dash = utils.parseMac("00-11-32-4F-C2-75");
+    const mac_dash = utils.parseMac("AA-BB-CC-DD-EE-FF");
     try std.testing.expect(mac_dash != null);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x11, 0x32, 0x4f, 0xc2, 0x75 }, &mac_dash.?);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff }, &mac_dash.?);
 
     var buf: [17]u8 = undefined;
     const formatted = utils.formatMac(&buf, mac_dash.?);
-    try std.testing.expectEqualStrings("00:11:32:4f:c2:75", formatted);
+    try std.testing.expectEqualStrings("aa:bb:cc:dd:ee:ff", formatted);
 
     // Invalid MAC strings
     try std.testing.expect(utils.parseMac("invalid") == null);
@@ -228,11 +228,11 @@ test "parseMac and formatMac" {
 
 test "parseArpEntry extracts both IP and MAC" {
     // macOS
-    const mac_line = utils.parseArpEntry("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
+    const mac_line = utils.parseArpEntry("? (192.168.1.1) at 00:11:22:33:44:55 on en0 ifscope [ethernet]");
     try std.testing.expect(mac_line != null);
     try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &mac_line.?.ip);
     try std.testing.expect(mac_line.?.mac != null);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x10, 0xe6, 0x6b, 0x26, 0x7e, 0x53 }, &mac_line.?.mac.?);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 }, &mac_line.?.mac.?);
     try std.testing.expect(!mac_line.?.is_reachable);
 
     // Linux ip neigh (REACHABLE)
@@ -254,10 +254,10 @@ test "parseArpEntry extracts both IP and MAC" {
     try std.testing.expect(!stale_line.?.is_reachable);
 
     // Windows
-    const win_line = utils.parseArpEntry("  192.168.0.30          2c-cf-67-89-ea-27     dynamic");
+    const win_line = utils.parseArpEntry("  192.168.1.50          00-11-22-33-44-55     dynamic");
     try std.testing.expect(win_line != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 0, 30 }, &win_line.?.ip);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 50 }, &win_line.?.ip);
     try std.testing.expect(win_line.?.mac != null);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x2c, 0xcf, 0x67, 0x89, 0xea, 0x27 }, &win_line.?.mac.?);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 }, &win_line.?.mac.?);
     try std.testing.expect(!win_line.?.is_reachable);
 }
