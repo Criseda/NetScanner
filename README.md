@@ -35,6 +35,7 @@ zig build
 ```sh
 ns -s <subnet> [options]       # Find live hosts (example: 192.168.0.0/24)
 ns -p <ip> <port-range>        # Scan one host for open ports (example: 192.168.1.1 1-1024)
+ns -s|-p ... --json            # One JSON object per line, for scripts and apps
 ns --help                      # Display help message
 ns --version                   # Display version
 ```

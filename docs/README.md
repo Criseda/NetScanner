@@ -25,6 +25,7 @@ file is the full guide.
 ```sh
 ns -s <subnet> [options]                   # Find live hosts (example: 192.168.0.0/24)
 ns -p <ip> <port-range> [--timeout <ms>]   # Scan one host for open ports (example: 192.168.1.1 1-1024)
+ns -s|-p ... --json                        # Machine-readable output, one JSON object per line
 ns --help                                 # Display help message
 ns --version                              # Display version
 ```
@@ -52,6 +53,33 @@ IP               HOSTNAME                  MAC                MANUFACTURER
 ```
 
 When run without resolution flags, `ns -s` outputs the classic compact numerical list followed by the host count and elapsed time.
+
+### Machine-readable output (`--json`)
+
+Add `--json` to `-s` or `-p` for one JSON object per line on stdout
+(NDJSON), for scripts and frontends such as NetScannerDesktop. Every
+line has a `type`; events stream as they happen, and `summary` is
+always last:
+
+```text
+{"type":"start","mode":"subnet","cidr":"192.168.1.0/24","first":"192.168.1.0","last":"192.168.1.255"}
+{"type":"host","ip":"192.168.1.10","source":"tcp"}
+{"type":"host","ip":"192.168.1.25","source":"arp"}
+{"type":"host_detail","ip":"192.168.1.10","hostname":"nas-storage","mac":"00:11:32:11:22:33","vendor":"Synology Incorporated"}
+{"type":"summary","hosts":2,"elapsed_ms":1843}
+```
+
+- `host.source` is `tcp`, `arp` or `ping` (`--ping` scans).
+- `host_detail` lines appear only with `--resolve`, `--hostname` or
+  `--vendor`, one per host, after the sweep. Only requested fields are
+  present; unresolved ones are `null`.
+- Port scans stream `{"type":"port","port":80}` and end with
+  `{"type":"summary","open_ports":[22,80],"elapsed_ms":512}`.
+- Input errors print `{"type":"error","message":"..."}` and exit with
+  status 1. Diagnostics (warnings) stay on stderr as plain text.
+
+In both modes, invalid input exits with status 1 and a successful scan
+(even one that finds nothing) exits with 0.
 
 ## Installation
 
