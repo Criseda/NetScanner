@@ -11,7 +11,7 @@ pub const IpRange = struct {
 };
 
 fn stdoutWriter(io: std.Io, buffer: []u8) std.Io.File.Writer {
-    return .init(.stdout(), io, buffer);
+    return .initStreaming(.stdout(), io, buffer);
 }
 
 pub fn printUsage(io: std.Io) !void {
@@ -38,6 +38,9 @@ pub fn printUsage(io: std.Io) !void {
         \\PORT OPTIONS (-p):
         \\  --timeout <ms>              Probe connection timeout in milliseconds (default: 500)
         \\
+        \\OUTPUT OPTIONS (-s, -p):
+        \\  --json                      One JSON object per line, for scripts and apps
+        \\
         \\FLAGS:
         \\  -h, --help                  Display this help message
         \\  -v, --version               Display version information
@@ -54,7 +57,7 @@ pub fn printUsage(io: std.Io) !void {
 }
 
 pub fn printVersion(io: std.Io) !void {
-    const version = "v1.2.2";
+    const version = "v1.3.0";
     var buf: [64]u8 = undefined;
     var w = stdoutWriter(io, &buf);
     try w.interface.print("{s}\n", .{version});
@@ -70,6 +73,39 @@ pub fn printStdout(io: std.Io, mutex: *std.Io.Mutex, comptime fmt: []const u8, a
     var w = stdoutWriter(io, &buf);
     w.interface.print(fmt, args) catch {};
     w.interface.flush() catch {};
+}
+
+/// Escape `s` for use inside a JSON string literal (without the quotes),
+/// writing into `buf`. Hostnames and vendor names come off the network
+/// or an OUI file, so quotes, backslashes and control bytes must never
+/// reach `--json` output raw. Bytes >= 0x80 pass through untouched (JSON
+/// is UTF-8). Output that would not fit is cut at a whole escape, never
+/// mid-sequence, so the result is always valid inside quotes.
+pub fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
+    const hex = "0123456789abcdef";
+    var n: usize = 0;
+    for (s) |c| {
+        var tmp: [6]u8 = undefined;
+        const piece: []const u8 = switch (c) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            0...8, 11, 12, 14...0x1f, 0x7f => blk: {
+                tmp = .{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 0xf] };
+                break :blk &tmp;
+            },
+            else => blk: {
+                tmp[0] = c;
+                break :blk tmp[0..1];
+            },
+        };
+        if (n + piece.len > buf.len) break;
+        @memcpy(buf[n .. n + piece.len], piece);
+        n += piece.len;
+    }
+    return buf[0..n];
 }
 
 pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {

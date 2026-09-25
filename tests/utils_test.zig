@@ -272,3 +272,23 @@ test "parseArpEntry handles rows from the native macOS reader" {
     // Unresolved entries are dropped, as with `arp -a`.
     try std.testing.expect(utils.parseArpEntry("? (192.168.1.200) at (incomplete) on en0") == null);
 }
+
+test "jsonEscape escapes quotes, backslashes and control bytes" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("plain-host.local", utils.jsonEscape(&buf, "plain-host.local"));
+    try std.testing.expectEqualStrings("a\\\"b\\\\c", utils.jsonEscape(&buf, "a\"b\\c"));
+    try std.testing.expectEqualStrings("\\n\\r\\t", utils.jsonEscape(&buf, "\n\r\t"));
+    try std.testing.expectEqualStrings("\\u001b[31m\\u007f", utils.jsonEscape(&buf, "\x1b[31m\x7f"));
+}
+
+test "jsonEscape passes UTF-8 through untouched" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Soci\u{e9}t\u{e9} G\u{e9}n\u{e9}rale", utils.jsonEscape(&buf, "Soci\u{e9}t\u{e9} G\u{e9}n\u{e9}rale"));
+}
+
+test "jsonEscape never cuts an escape sequence in half" {
+    // Room for "ab" plus two bytes: the 6-byte \u001b escape must be
+    // dropped whole rather than truncated into invalid JSON.
+    var buf: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("ab", utils.jsonEscape(&buf, "ab\x1bcd"));
+}

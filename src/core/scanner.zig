@@ -18,6 +18,9 @@ pub const NetworkScanOptions = struct {
     resolve_hostname: bool = false,
     resolve_vendor: bool = false,
     oui_file: ?[]const u8 = null,
+    /// Emit one JSON object per line (`--json`) instead of the
+    /// human-readable text, for programs that drive `ns`.
+    json: bool = false,
 };
 
 /// How many port-scan workers run at once. One fixed worker per
@@ -172,6 +175,8 @@ pub const ScanOptions = struct {
     /// unusually slow networks; lower it on a fast LAN for even
     /// quicker sweeps.
     timeout_ms: ?u16 = null,
+    /// Stream `{"type":"port",...}` lines instead of "Open port: N".
+    json: bool = false,
 };
 
 pub fn scanPorts(
@@ -196,7 +201,7 @@ pub fn scanPorts(
         if (tcpConnectPort(ip_address, start_port, timeout_ms) == .open) {
             if (options.progress) {
                 var stdout_mutex: std.Io.Mutex = .init;
-                utils.printStdout(io, &stdout_mutex, "Open port: {}\n", .{start_port});
+                printOpenPort(io, &stdout_mutex, start_port, options.json);
             }
             try open_ports.append(allocator, start_port);
         }
@@ -239,6 +244,7 @@ pub fn scanPorts(
         .stdout_mutex = &stdout_mutex,
         .progress = options.progress,
         .timeout_ms = timeout_ms,
+        .json = options.json,
     };
     for (0..worker_count) |_| {
         const t = try Thread.spawn(.{}, portWorker, .{shares});
@@ -273,7 +279,17 @@ const PortShares = struct {
     stdout_mutex: *std.Io.Mutex,
     progress: bool,
     timeout_ms: c_int,
+    json: bool,
 };
+
+/// One streamed port-scan hit, in text or JSON form.
+fn printOpenPort(io: std.Io, stdout_mutex: *std.Io.Mutex, port: u16, json: bool) void {
+    if (json) {
+        utils.printStdout(io, stdout_mutex, "{{\"type\":\"port\",\"port\":{d}}}\n", .{port});
+    } else {
+        utils.printStdout(io, stdout_mutex, "Open port: {}\n", .{port});
+    }
+}
 
 /// Pull the next port until the range is exhausted. Only open ports
 /// are recorded; closed (refused) and filtered (timeout) both mean
@@ -286,7 +302,7 @@ fn portWorker(shares: PortShares) void {
         const port: u16 = @intCast(port_num);
         if (tcpConnectPort(shares.ip, port, shares.timeout_ms) != .open) continue;
         if (shares.progress) {
-            utils.printStdout(shares.io, shares.stdout_mutex, "Open port: {}\n", .{port});
+            printOpenPort(shares.io, shares.stdout_mutex, port, shares.json);
         }
         shares.ports_mutex.lockUncancelable(shares.io);
         defer shares.ports_mutex.unlock(shares.io);
@@ -314,16 +330,14 @@ const Discovery = struct {
     found_mutex: *std.Io.Mutex,
     ip_mac_map: *std.AutoHashMap([4]u8, [6]u8),
     ip_mac_mutex: *std.Io.Mutex,
+    json: bool,
 
-    /// Record a host as found and print it. The suffix tags how it was
-    /// found, e.g. " (arp)" for ARP-harvested hosts, "" otherwise.
-    fn reportHost(self: Discovery, ip: [4]u8, comptime suffix: []const u8) void {
+    /// Record a host as found and print it, tagged with how it was found.
+    fn reportHost(self: Discovery, ip: [4]u8, comptime source: HostSource) void {
         self.found_mutex.lockUncancelable(self.io);
         defer self.found_mutex.unlock(self.io);
         self.found.append(self.allocator, ip) catch return;
-        utils.printStdout(self.io, self.stdout_mutex, "Host {d}.{d}.{d}.{d} is online" ++ suffix ++ "\n", .{
-            ip[0], ip[1], ip[2], ip[3],
-        });
+        printHost(self.io, self.stdout_mutex, ip, source, self.json);
     }
 
     fn isFound(self: Discovery, ip: [4]u8) bool {
@@ -341,6 +355,25 @@ const Discovery = struct {
         self.ip_mac_map.put(ip, mac) catch return;
     }
 };
+
+/// How a host was found. Text output tags only ARP hosts (" (arp)");
+/// JSON output always names the source.
+const HostSource = enum { tcp, arp, ping };
+
+/// One streamed discovery hit, e.g. `Host 192.168.1.10 is online (arp)`
+/// or `{"type":"host","ip":"192.168.1.10","source":"arp"}`.
+fn printHost(io: std.Io, stdout_mutex: *std.Io.Mutex, ip: [4]u8, comptime source: HostSource, json: bool) void {
+    if (json) {
+        utils.printStdout(io, stdout_mutex, "{{\"type\":\"host\",\"ip\":\"{d}.{d}.{d}.{d}\",\"source\":\"" ++ @tagName(source) ++ "\"}}\n", .{
+            ip[0], ip[1], ip[2], ip[3],
+        });
+    } else {
+        const suffix = if (source == .arp) " (arp)" else "";
+        utils.printStdout(io, stdout_mutex, "Host {d}.{d}.{d}.{d} is online" ++ suffix ++ "\n", .{
+            ip[0], ip[1], ip[2], ip[3],
+        });
+    }
+}
 
 /// Run the TCP probe once per IP in the list and wait for every
 /// worker before returning. A fixed pool pulls indexes from a shared
@@ -398,8 +431,15 @@ fn sweepHosts(
 /// a one-line count plus elapsed time. The streaming "is online" lines
 /// stay as live progress; this block is the diffable record, so it
 /// takes the lock once for the whole block instead of per line.
-fn printSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, found: [][4]u8, elapsed_ns: i96) void {
+fn printSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, found: [][4]u8, elapsed_ns: i96, json: bool) void {
     std.mem.sort([4]u8, found, {}, ipLessThan);
+
+    // JSON consumers already have every host from the streamed events;
+    // the recap is just the closing count.
+    if (json) {
+        printJsonSummary(io, stdout_mutex, found.len, elapsed_ns);
+        return;
+    }
 
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
     const noun: []const u8 = if (found.len == 1) "host" else "hosts";
@@ -407,7 +447,7 @@ fn printSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, found: [][4]u8, elapsed
     stdout_mutex.lockUncancelable(io);
     defer stdout_mutex.unlock(io);
     var buf: [1024]u8 = undefined;
-    var writer: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    var writer: std.Io.File.Writer = .initStreaming(.stdout(), io, &buf);
     const out = &writer.interface;
     for (found) |ip| {
         out.print("{d}.{d}.{d}.{d}\n", .{ ip[0], ip[1], ip[2], ip[3] }) catch return;
@@ -415,6 +455,13 @@ fn printSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, found: [][4]u8, elapsed
     }
     out.print("{d} {s} up ({d:.1}s)\n", .{ found.len, noun, seconds }) catch {};
     out.flush() catch {};
+}
+
+/// `{"type":"summary","hosts":N,"elapsed_ms":M}`: always the last line
+/// of a `--json` subnet scan.
+fn printJsonSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, host_count: usize, elapsed_ns: i96) void {
+    const elapsed_ms: i64 = @intCast(@divTrunc(elapsed_ns, std.time.ns_per_ms));
+    utils.printStdout(io, stdout_mutex, "{{\"type\":\"summary\",\"hosts\":{d},\"elapsed_ms\":{d}}}\n", .{ host_count, elapsed_ms });
 }
 
 pub const HostDetail = struct {
@@ -537,11 +584,47 @@ fn printDetailedSummary(
     stdout_mutex.lockUncancelable(io);
     defer stdout_mutex.unlock(io);
     var buf: [2048]u8 = undefined;
-    var writer: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    var writer: std.Io.File.Writer = .initStreaming(.stdout(), io, &buf);
     const out = &writer.interface;
 
     var ip_str_buf: [16]u8 = undefined;
     var mac_str_buf: [17]u8 = undefined;
+
+    if (options.json) {
+        // One host_detail per host; unresolved fields are null, and only
+        // the fields that were asked for appear at all.
+        var h_buf: [768]u8 = undefined;
+        var v_buf: [768]u8 = undefined;
+        for (details) |d| {
+            const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+            out.print("{{\"type\":\"host_detail\",\"ip\":\"{s}\"", .{ip_str}) catch return;
+            if (options.resolve_hostname) {
+                if (d.hostname) |h| {
+                    out.print(",\"hostname\":\"{s}\"", .{utils.jsonEscape(&h_buf, h)}) catch return;
+                } else {
+                    out.writeAll(",\"hostname\":null") catch return;
+                }
+            }
+            if (options.resolve_vendor) {
+                if (d.mac) |m| {
+                    out.print(",\"mac\":\"{s}\"", .{utils.formatMac(&mac_str_buf, m)}) catch return;
+                } else {
+                    out.writeAll(",\"mac\":null") catch return;
+                }
+                if (d.vendor) |v| {
+                    out.print(",\"vendor\":\"{s}\"", .{utils.jsonEscape(&v_buf, v)}) catch return;
+                } else {
+                    out.writeAll(",\"vendor\":null") catch return;
+                }
+            }
+            out.writeAll("}\n") catch return;
+            out.flush() catch return;
+        }
+        const elapsed_ms: i64 = @intCast(@divTrunc(elapsed_ns, std.time.ns_per_ms));
+        out.print("{{\"type\":\"summary\",\"hosts\":{d},\"elapsed_ms\":{d}}}\n", .{ details.len, elapsed_ms }) catch {};
+        out.flush() catch {};
+        return;
+    }
 
     if (details.len > 0) {
         if (options.resolve_hostname and options.resolve_vendor) {
@@ -583,7 +666,22 @@ fn ipLessThan(_: void, a: [4]u8, b: [4]u8) bool {
 }
 
 /// Print the one-line header every network scan starts with.
-fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, range: utils.IpRange) void {
+fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, range: utils.IpRange, json: bool) void {
+    if (json) {
+        var cidr_buf: [128]u8 = undefined;
+        utils.printStdout(io, stdout_mutex, "{{\"type\":\"start\",\"mode\":\"subnet\",\"cidr\":\"{s}\",\"first\":\"{d}.{d}.{d}.{d}\",\"last\":\"{d}.{d}.{d}.{d}\"}}\n", .{
+            utils.jsonEscape(&cidr_buf, cidr),
+            range.start[0],
+            range.start[1],
+            range.start[2],
+            range.start[3],
+            range.end[0],
+            range.end[1],
+            range.end[2],
+            range.end[3],
+        });
+        return;
+    }
     utils.printStdout(io, stdout_mutex, "Scanning network: {s} (Range: {d}.{d}.{d}.{d} - {d}.{d}.{d}.{d})\n", .{
         cidr,
         range.start[0],
@@ -669,7 +767,7 @@ pub fn scanNetworkPing(
     const ip_range = try utils.getIpRange(network);
 
     var stdout_mutex: std.Io.Mutex = .init;
-    printScanHeader(io, &stdout_mutex, cidr, ip_range);
+    printScanHeader(io, &stdout_mutex, cidr, ip_range, options.json);
     const started = std.Io.Clock.now(.awake, io);
 
     // Single-threaded from here: one batch, then report. No locks needed
@@ -686,9 +784,7 @@ pub fn scanNetworkPing(
     for (targets.items, alive) |ip, is_up| {
         if (!is_up) continue;
         found.append(allocator, ip) catch continue;
-        utils.printStdout(io, &stdout_mutex, "Host {d}.{d}.{d}.{d} is online\n", .{
-            ip[0], ip[1], ip[2], ip[3],
-        });
+        printHost(io, &stdout_mutex, ip, .ping, options.json);
     }
 
     var ip_mac_map = std.AutoHashMap([4]u8, [6]u8).init(allocator);
@@ -709,7 +805,7 @@ pub fn scanNetworkPing(
     if (options.resolve_hostname or options.resolve_vendor) {
         printDetailedSummary(allocator, io, &stdout_mutex, found.items, &ip_mac_map, options, elapsed);
     } else {
-        printSummary(io, &stdout_mutex, found.items, elapsed);
+        printSummary(io, &stdout_mutex, found.items, elapsed, options.json);
     }
 }
 
@@ -757,7 +853,7 @@ pub fn scanNetwork(
     const ip_range = try utils.getIpRange(network);
 
     var stdout_mutex: std.Io.Mutex = .init;
-    printScanHeader(io, &stdout_mutex, cidr, ip_range);
+    printScanHeader(io, &stdout_mutex, cidr, ip_range, options.json);
     const started = std.Io.Clock.now(.awake, io);
 
     const hosts = utils.usableHosts(network, ip_range);
@@ -777,6 +873,7 @@ pub fn scanNetwork(
         .found_mutex = &found_mutex,
         .ip_mac_map = &ip_mac_map,
         .ip_mac_mutex = &ip_mac_mutex,
+        .json = options.json,
     };
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
@@ -788,12 +885,12 @@ pub fn scanNetwork(
     if (options.resolve_hostname or options.resolve_vendor) {
         printDetailedSummary(allocator, io, &stdout_mutex, found.items, &ip_mac_map, options, elapsed);
     } else {
-        printSummary(io, &stdout_mutex, found.items, elapsed);
+        printSummary(io, &stdout_mutex, found.items, elapsed, options.json);
     }
 }
 
 fn tcpWorker(shares: Discovery, ip: [4]u8) void {
-    if (tcpProbe(ip)) shares.reportHost(ip, "");
+    if (tcpProbe(ip)) shares.reportHost(ip, .tcp);
 }
 
 /// Returns true when the host answers on the probe port or actively
@@ -831,7 +928,7 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
         // exchanged packets with this host and confirmed its Layer 2 presence. We can
         // report it immediately without waiting on an ICMP ping.
         if (entry.is_reachable) {
-            shares.reportHost(entry.ip, " (arp)");
+            shares.reportHost(entry.ip, .arp);
             continue;
         }
 
@@ -848,7 +945,7 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
 
     for (candidates.items, alive) |ip, is_up| {
         if (is_up) {
-            shares.reportHost(ip, " (arp)");
+            shares.reportHost(ip, .arp);
         } else {
             unconfirmed.append(shares.allocator, ip) catch continue;
         }
@@ -880,7 +977,7 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
                     const ip_str = std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch continue;
                     if (c_bindings.getMacSendArp(ip_str.ptr)) |mac| {
                         j.shares.recordMac(ip, mac);
-                        j.shares.reportHost(ip, " (arp)");
+                        j.shares.reportHost(ip, .arp);
                     }
                 }
             }

@@ -1,6 +1,6 @@
 # NetScanner
 
-![Version](https://img.shields.io/badge/Version-v1.2.2-red)
+![Version](https://img.shields.io/badge/Version-v1.3.0-red)
 ![Language](https://img.shields.io/badge/Language-0.16.0-orange?logo=zig&logoSize=auto)
 ![OS](https://img.shields.io/badge/OS-Linux%2C%20MacOS%2C%20Windows-blue)
 ![License](https://img.shields.io/badge/License-GNU%20GPL--3.0-green)
@@ -35,6 +35,7 @@ zig build
 ```sh
 ns -s <subnet> [options]       # Find live hosts (example: 192.168.0.0/24)
 ns -p <ip> <port-range>        # Scan one host for open ports (example: 192.168.1.1 1-1024)
+ns -s|-p ... --json            # One JSON object per line, for scripts and apps
 ns --help                      # Display help message
 ns --version                   # Display version
 ```

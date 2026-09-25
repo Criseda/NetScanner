@@ -1,7 +1,23 @@
 # Changelog
 
-## Unreleased
+## v1.3.0
 
+Machine-readable output for scripts and frontends, and reliable exit codes:
+
+- New `--json` flag for `-s` and `-p`: one JSON object per line (`start`,
+  `host`, `host_detail`, `port`, `summary`, `error`) so programs can drive
+  `ns` without scraping the human-readable text, which is free to keep
+  changing. Hostnames and vendor names are JSON-escaped. See
+  `docs/README.md`. NetScannerDesktop uses it automatically.
+- Invalid input now exits with status 1 (it used to print the
+  `NetScanner: ...` message and exit 0), so scripts can tell a failure
+  from a scan that found nothing. A malformed subnet prints a clear
+  message instead of a raw error trace. **Behavior change** for scripts
+  that relied on exit 0.
+- Redirecting output to a file (`ns -s ... > hosts.txt`) no longer
+  garbles it: every line used to be written at the start of the file,
+  overwriting the previous one. Pipes and terminals were not affected.
+- `--help` lists the new OUTPUT OPTIONS section.
 - `zig build` on macOS no longer prints "replacing existing signature" on
   every run, which made successful builds look like failures. The binary is
   now signed only when it changes, silently; codesign errors still show and
