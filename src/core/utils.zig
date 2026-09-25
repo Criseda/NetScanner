@@ -57,7 +57,7 @@ pub fn printUsage(io: std.Io) !void {
 }
 
 pub fn printVersion(io: std.Io) !void {
-    const version = "v1.3.0";
+    const version = "v1.4.0";
     var buf: [64]u8 = undefined;
     var w = stdoutWriter(io, &buf);
     try w.interface.print("{s}\n", .{version});
