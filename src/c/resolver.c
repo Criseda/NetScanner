@@ -21,6 +21,15 @@
 #include <poll.h>
 #endif
 
+#ifdef __APPLE__
+#include <errno.h>
+#include <net/if.h>
+#include <net/if_dl.h>
+#include <net/route.h>
+#include <stdint.h>
+#include <sys/sysctl.h>
+#endif
+
 int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len) {
 #ifdef _WIN32
   win_wsa_init_once();
@@ -430,3 +439,86 @@ int get_mac_sendarp(const char *ip_address, unsigned char out_mac[6]) {
 #endif
 }
 
+
+#ifdef __APPLE__
+/// Routing-socket sockaddrs are padded to 4-byte boundaries (same rounding as
+/// Apple's arp.c), so the link-layer address sits after the rounded IPv4 one.
+#define ARP_SA_ROUNDUP(a) \
+  ((a) > 0 ? (1 + (((a) - 1) | (sizeof(uint32_t) - 1))) : sizeof(uint32_t))
+/// Worst-case length of one formatted row, interface name included.
+#define ARP_ROW_MAX (64 + IF_NAMESIZE)
+#endif
+
+char *dump_arp_table(size_t *out_len) {
+#ifdef __APPLE__
+  if (!out_len) return NULL;
+  int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_LLINFO};
+
+  // The table can grow between sizing and reading, so retry with slack.
+  char *raw = NULL;
+  size_t raw_len = 0;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    size_t needed = 0;
+    if (sysctl(mib, 6, NULL, &needed, NULL, 0) < 0) return NULL;
+    raw_len = needed + needed / 2 + sizeof(struct rt_msghdr);
+    free(raw);
+    raw = (char *)malloc(raw_len);
+    if (!raw) return NULL;
+    if (sysctl(mib, 6, raw, &raw_len, NULL, 0) == 0) break;
+    if (errno != ENOMEM || attempt == 2) {
+      free(raw);
+      return NULL;
+    }
+  }
+
+  // Each message is at least one rt_msghdr, which bounds the row count.
+  size_t rows = raw_len / sizeof(struct rt_msghdr) + 1;
+  char *out = (char *)malloc(rows * ARP_ROW_MAX + 1);
+  if (!out) {
+    free(raw);
+    return NULL;
+  }
+  size_t used = 0;
+  out[0] = '\0';
+
+  for (char *next = raw; next < raw + raw_len;) {
+    struct rt_msghdr *rtm = (struct rt_msghdr *)next;
+    if (rtm->rtm_msglen == 0) break;
+    next += rtm->rtm_msglen;
+
+    struct sockaddr_in *sin = (struct sockaddr_in *)(rtm + 1);
+    if (sin->sin_family != AF_INET) continue;
+    struct sockaddr_dl *sdl =
+        (struct sockaddr_dl *)((char *)sin + ARP_SA_ROUNDUP(sin->sin_len));
+
+    char ip[INET_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip))) continue;
+    char ifname[IF_NAMESIZE] = "?";
+    if_indextoname(sdl->sdl_index, ifname);
+
+    int n;
+    if (sdl->sdl_family == AF_LINK && sdl->sdl_alen == 6) {
+      const unsigned char *mac = (const unsigned char *)LLADDR(sdl);
+      n = snprintf(out + used, ARP_ROW_MAX,
+                   "? (%s) at %02x:%02x:%02x:%02x:%02x:%02x on %s [ethernet]\n",
+                   ip, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ifname);
+    } else {
+      // Unresolved entry: the shared parser drops "(incomplete)" rows.
+      n = snprintf(out + used, ARP_ROW_MAX, "? (%s) at (incomplete) on %s\n",
+                   ip, ifname);
+    }
+    if (n > 0 && n < ARP_ROW_MAX) used += (size_t)n;
+  }
+
+  free(raw);
+  *out_len = used;
+  return out;
+#else
+  (void)out_len;
+  return NULL;
+#endif
+}
+
+void free_arp_table(char *ptr) {
+  if (ptr) free(ptr);
+}

@@ -7,6 +7,8 @@
   green before any PR.
 - `zig build release -Doptimize=ReleaseFast` — all five release
   binaries. CI also builds and tests on Linux, macOS and Windows.
+  Build releases on a Mac: macOS binaries must be codesigned (see
+  `installAndSign` in `build.zig`) or macOS hides the ARP table.
 
 ## Changelog per change
 

@@ -11,6 +11,8 @@ pub const c = struct {
     pub extern "c" fn read_file_content(path: [*:0]const u8, out_len: *usize) ?[*]u8;
     pub extern "c" fn free_file_content(ptr: [*]u8) void;
     pub extern "c" fn get_mac_sendarp(ip_address: [*:0]const u8, out_mac: [*]u8) c_int;
+    pub extern "c" fn dump_arp_table(out_len: *usize) ?[*]u8;
+    pub extern "c" fn free_arp_table(ptr: [*]u8) void;
 };
 
 const std = @import("std");
@@ -21,6 +23,17 @@ pub fn getMacSendArp(ip_null_terminated: [*:0]const u8) ?[6]u8 {
         return mac;
     }
     return null;
+}
+
+/// Read the macOS neighbour table straight from the kernel, as `arp -a`
+/// formatted text owned by `allocator`. Null on failure or off macOS.
+/// An empty (but non-null) result on macOS 27 usually means the binary
+/// is not codesigned with a real identifier; see resolver.h.
+pub fn dumpArpTable(allocator: std.mem.Allocator) ?[]u8 {
+    var len: usize = 0;
+    const ptr = c.dump_arp_table(&len) orelse return null;
+    defer c.free_arp_table(ptr);
+    return allocator.dupe(u8, ptr[0..len]) catch null;
 }
 
 pub fn readFileContent(path_null_terminated: [*:0]const u8) ?[]const u8 {

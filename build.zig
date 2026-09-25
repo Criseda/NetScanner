@@ -5,8 +5,13 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = buildExe(b, target, optimize);
-    b.installArtifact(exe);
+    const install_exe = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(installAndSign(b, install_exe, .bin, target));
 
+    // Note: on macOS `zig build run` never sees the ARP table (MAC and
+    // manufacturer columns stay blank) because `zig` is the parent
+    // process; run ./zig-out/bin/ns from a shell instead (see
+    // installAndSign).
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
@@ -35,12 +40,50 @@ pub fn build(b: *std.Build) void {
 
     const release_step = b.step("release", "Build releases for all target platforms");
     for (releaseTargets()) |t| {
-        const release_exe = buildExe(b, b.resolveTargetQuery(t.query), optimize);
+        const release_target = b.resolveTargetQuery(t.query);
+        const release_exe = buildExe(b, release_target, optimize);
+        const dest_dir: std.Build.InstallDir = .{ .custom = t.dest_dir };
         const install_release = b.addInstallArtifact(release_exe, .{
-            .dest_dir = .{ .override = .{ .custom = t.dest_dir } },
+            .dest_dir = .{ .override = dest_dir },
         });
-        release_step.dependOn(&install_release.step);
+        release_step.dependOn(installAndSign(b, install_release, dest_dir, release_target));
     }
+}
+
+/// Reverse-DNS identifier `ns` is codesigned with on macOS.
+const CODESIGN_IDENTIFIER = "io.github.criseda.netscanner";
+
+/// macOS binaries need signing, and only a macOS host has `codesign`.
+fn needsCodesign(b: *std.Build, target: std.Build.ResolvedTarget) bool {
+    return target.result.os.tag == .macos and b.graph.host.result.os.tag == .macos;
+}
+
+/// Install an artifact and, for macOS, ad-hoc codesign the installed
+/// copy with a reverse-DNS identifier. Returns the step to depend on.
+///
+/// Why: macOS 27 hides the kernel neighbour (ARP) table from
+/// third-party binaries unless they carry a real code identity. The
+/// linker's default signature and plain `codesign -s -` (identifier
+/// `ns-<hash>`) both get an empty table, which blanks the MAC and
+/// manufacturer columns and the quiet-host ARP harvest. The table is
+/// also hidden when a third-party program (rather than a shell) is the
+/// parent process, which no signature fixes. An ad-hoc signature needs
+/// no Apple developer account. The installed copy is signed, never the
+/// cached one, so the build cache stays untouched.
+///
+/// Cross-building macOS releases on Linux or Windows leaves them
+/// unsigned (no `codesign` there); build releases on a Mac.
+fn installAndSign(
+    b: *std.Build,
+    install: *std.Build.Step.InstallArtifact,
+    dest_dir: std.Build.InstallDir,
+    target: std.Build.ResolvedTarget,
+) *std.Build.Step {
+    if (!needsCodesign(b, target)) return &install.step;
+    const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--identifier", CODESIGN_IDENTIFIER });
+    sign.addArg(b.getInstallPath(dest_dir, install.artifact.out_filename));
+    sign.step.dependOn(&install.step);
+    return &sign.step;
 }
 
 const Libraries = struct {

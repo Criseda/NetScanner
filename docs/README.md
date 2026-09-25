@@ -93,6 +93,11 @@ Binaries land in `zig-out/releases/`, one folder per platform
 (`windows`, `macos-x86_64`, `macos-arm64`, `linux-x86_64`,
 `linux-arm64`).
 
+Build releases on a Mac. `zig build` ad-hoc codesigns the macOS
+binaries, and without that signature macOS 27 hides the ARP table
+(no MAC addresses, manufacturers or quiet hosts). Cross-built macOS
+binaries are left unsigned.
+
 ## Linux test lab
 
 `docker/README.md` describes a virtual LAN for testing on Linux

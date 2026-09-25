@@ -35,4 +35,14 @@ void free_file_content(char *ptr);
 /// as ping-dropping devices. Returns -1 on non-Windows platforms.
 int get_mac_sendarp(const char *ip_address, unsigned char out_mac[6]);
 
+/// Dump the macOS kernel neighbour table via sysctl(NET_RT_FLAGS, RTF_LLINFO),
+/// formatted as `arp -a` rows ("? (ip) at mac on ifname [ethernet]") so the
+/// shared parser handles it unchanged. Exists because macOS 27 hides this table
+/// from third-party binaries: a spawned `arp -a` always comes back empty, and a
+/// direct sysctl only works when the caller is codesigned with a reverse-DNS
+/// identifier (build.zig does that). Returns a malloc'd buffer the caller
+/// releases with free_arp_table(), or NULL on failure / non-macOS platforms.
+char *dump_arp_table(size_t *out_len);
+void free_arp_table(char *ptr);
+
 #endif
