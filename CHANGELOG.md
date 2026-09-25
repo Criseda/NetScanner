@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.2.2
 
 MAC addresses and manufacturers work on macOS again (macOS 27 hid them):
 

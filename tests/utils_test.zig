@@ -264,11 +264,11 @@ test "parseArpEntry extracts both IP and MAC" {
 
 test "parseArpEntry handles rows from the native macOS reader" {
     // dump_arp_table (resolver.c) prints unpadded `arp -a` rows.
-    const row = utils.parseArpEntry("? (192.168.68.105) at 70:03:9f:69:28:99 on en0 [ethernet]");
+    const row = utils.parseArpEntry("? (192.168.1.105) at 00:0a:9f:69:28:09 on en0 [ethernet]");
     try std.testing.expect(row != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 68, 105 }, &row.?.ip);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x70, 0x03, 0x9f, 0x69, 0x28, 0x99 }, &row.?.mac.?);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 105 }, &row.?.ip);
+    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x0a, 0x9f, 0x69, 0x28, 0x09 }, &row.?.mac.?);
 
     // Unresolved entries are dropped, as with `arp -a`.
-    try std.testing.expect(utils.parseArpEntry("? (192.168.68.200) at (incomplete) on en0") == null);
+    try std.testing.expect(utils.parseArpEntry("? (192.168.1.200) at (incomplete) on en0") == null);
 }
