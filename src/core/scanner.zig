@@ -911,7 +911,27 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
 /// `ip neigh show` (minimal Linux distros often lack net-tools).
 /// Returns the output for the caller to free, or null when neither
 /// tool exists -- then discovery just ends after the TCP sweep.
+///
+/// macOS reads the kernel table directly instead: since macOS 27 the
+/// OS hides it from anything a third-party binary spawns, so `arp -a`
+/// run from `ns` always prints nothing. Even the direct read needs
+/// `ns` codesigned with a reverse-DNS identifier (build.zig does that)
+/// and a shell, not another third-party program, as its parent.
 pub fn dumpArpTable(allocator: std.mem.Allocator, io: std.Io) ?[]u8 {
+    if (comptime builtin.os.tag == .macos) {
+        if (c_bindings.dumpArpTable(allocator)) |table| {
+            // A LAN host always has at least its gateway in the table,
+            // so empty means macOS filtered it: say why the MAC column
+            // and quiet-host harvest will be blank instead of failing
+            // silently.
+            if (table.len == 0) {
+                std.debug.print("arp table is empty: macOS hides it unless ns is codesigned with an " ++
+                    "identifier (`zig build` on a Mac does this) and launched directly from a shell; " ++
+                    "MAC addresses, manufacturers and quiet hosts will be missing\n", .{});
+            }
+            return table;
+        }
+    }
     const commands = [_][]const []const u8{
         &.{ "arp", "-a" },
         &.{ "ip", "neigh", "show" },

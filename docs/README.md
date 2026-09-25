@@ -1,6 +1,6 @@
 # NetScanner
 
-![Version](https://img.shields.io/badge/Version-v1.2.1-red)
+![Version](https://img.shields.io/badge/Version-v1.2.2-red)
 ![Language](https://img.shields.io/badge/Language-0.16.0-orange?logo=zig&logoSize=auto)
 ![OS](https://img.shields.io/badge/OS-Linux%2C%20MacOS%2C%20Windows-blue)
 ![License](https://img.shields.io/badge/License-GNU%20GPL--3.0-green)
@@ -92,6 +92,11 @@ zig build release -Doptimize=ReleaseFast
 Binaries land in `zig-out/releases/`, one folder per platform
 (`windows`, `macos-x86_64`, `macos-arm64`, `linux-x86_64`,
 `linux-arm64`).
+
+Build releases on a Mac. `zig build` ad-hoc codesigns the macOS
+binaries, and without that signature macOS 27 hides the ARP table
+(no MAC addresses, manufacturers or quiet hosts). Cross-built macOS
+binaries are left unsigned.
 
 ## Linux test lab
 

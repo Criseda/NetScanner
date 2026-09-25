@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.2.2
+
+MAC addresses and manufacturers work on macOS again (macOS 27 hid them):
+
+- macOS 27 hides the kernel ARP table from third-party binaries: `arp -a`
+  spawned by `ns` printed nothing, so `--vendor` / `--resolve` showed `-`
+  for every MAC and manufacturer, and the ARP harvest silently found no quiet
+  hosts (a /23 scan here went from 8 hosts to 37).
+- `ns` now reads the table directly via `sysctl` on macOS, and `zig build`
+  ad-hoc codesigns macOS binaries with the identifier
+  `io.github.criseda.netscanner`, which macOS requires before it returns the
+  table. No Apple developer account or privileges needed.
+- macOS binaries must be built on a Mac: cross-built ones stay unsigned and
+  see an empty table.
+- Run `ns` directly from a shell. When another program is its parent
+  (including `zig build run`), macOS still hides the table.
+- An empty table now prints a warning explaining why, instead of blank
+  columns with no explanation.
+
 ## v1.2.1
 
 Hardware manufacturer identification data upgrade and binary lookup engine:
