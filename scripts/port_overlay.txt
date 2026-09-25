@@ -1,0 +1,156 @@
+# Curated port names, merged over the IANA registry by generate_ports.py.
+#
+#   port | label | category | iana | description
+#
+# label        Short display name (max 20 characters). Blank keeps the
+#              IANA service name. Required for ports IANA does not assign.
+# category     One of: web remote file mail dns database directory media
+#              printing messaging voip network vpn proxy home (or blank).
+# iana         Which IANA name to report when IANA lists several for the
+#              port and the first is not the one in use. Usually blank.
+# description  Replaces the IANA description. Blank keeps IANA's.
+#
+# Only add ports people actually meet on a LAN. When a port is commonly
+# used for something other than its IANA assignment, say so in the
+# description; the IANA name is still reported next to it. After editing,
+# run `python scripts/generate_ports.py` and commit both files.
+
+# Web
+80    | HTTP                 | web       |             |
+81    | HTTP alt             | web       |             | Common alternate HTTP port (routers, cameras)
+443   | HTTPS                | web       |             |
+3000  | Web app              | web       |             | Common web app and dev server port (Grafana, Node.js)
+5000  | Web app / UPnP       | web       |             | Common web app port (Synology DSM, Flask); also UPnP and AirPlay on macOS
+5001  | Web app (HTTPS)      | web       |             | Common HTTPS web app port (Synology DSM)
+8000  | HTTP alt             | web       |             | Common alternate HTTP port (dev servers, web apps)
+8008  | HTTP alt             | web       |             |
+8080  | HTTP alt             | web       |             |
+8081  | HTTP alt             | web       |             | Common alternate HTTP port
+8443  | HTTPS alt            | web       |             | Common alternate HTTPS port (web admin panels)
+8888  | HTTP alt             | web       |             | Common alternate HTTP port (Jupyter, proxies)
+9090  | Web admin            | web       |             | Common web admin port (Cockpit, Prometheus)
+9443  | HTTPS alt            | web       |             | Common alternate HTTPS port (Portainer, web admin panels)
+10000 | Webmin / NDMP        | web       |             | Webmin admin panel, or NDMP backup
+
+# Remote access
+22    | SSH                  | remote    |             |
+23    | Telnet               | remote    |             |
+902   | VMware auth          | remote    |             | VMware Authorization Service (remote console)
+912   | VMware auth          | remote    |             | VMware Authorization Service
+2222  | SSH alt              | remote    |             | Common alternate SSH port
+3283  | Apple Remote Desktop | remote    |             | Apple Remote Desktop (Net Assistant)
+3389  | RDP                  | remote    |             | Remote Desktop Protocol (Windows)
+5555  | ADB                  | remote    |             | Android Debug Bridge over the network (Android TVs, phones)
+5900  | VNC                  | remote    |             | Virtual Network Computing (Remote Framebuffer)
+5901  | VNC :1               | remote    |             | VNC display :1
+5938  | TeamViewer           | remote    |             | TeamViewer remote support
+5985  | WinRM                | remote    |             | Windows Remote Management over HTTP
+5986  | WinRM (HTTPS)        | remote    |             | Windows Remote Management over HTTPS
+8291  | Winbox               | remote    |             | MikroTik Winbox router management
+
+# File transfer and sharing
+20    | FTP data             | file      |             |
+21    | FTP                  | file      |             |
+69    | TFTP                 | file      |             |
+139   | NetBIOS / SMB        | file      |             | NetBIOS Session Service (SMB over NetBIOS)
+445   | SMB                  | file      |             | Windows file sharing (SMB over TCP)
+548   | AFP                  | file      |             | Apple Filing Protocol
+873   | rsync                | file      |             |
+989   | FTPS data            | file      |             |
+990   | FTPS                 | file      |             |
+2049  | NFS                  | file      | nfs         |
+3260  | iSCSI                | file      |             | iSCSI storage target
+22000 | Syncthing            | file      |             | Syncthing file synchronization
+
+# Mail
+25    | SMTP                 | mail      |             |
+110   | POP3                 | mail      |             |
+143   | IMAP                 | mail      |             |
+465   | SMTPS                | mail      | submissions |
+587   | SMTP submission      | mail      |             |
+993   | IMAPS                | mail      |             |
+995   | POP3S                | mail      |             |
+
+# DNS
+53    | DNS                  | dns       |             |
+853   | DNS over TLS         | dns       |             |
+5353  | mDNS                 | dns       |             |
+
+# Databases
+1433  | MS SQL Server        | database  |             |
+1521  | Oracle DB            | database  |             | Oracle Database listener
+3306  | MySQL                | database  |             |
+5432  | PostgreSQL           | database  |             |
+5984  | CouchDB              | database  |             |
+6379  | Redis                | database  |             |
+8086  | InfluxDB             | database  |             | InfluxDB HTTP API
+9042  | Cassandra            | database  |             | Apache Cassandra (CQL)
+9200  | Elasticsearch        | database  |             | Elasticsearch REST API
+11211 | Memcached            | database  |             |
+27017 | MongoDB              | database  |             |
+
+# Directory and authentication
+88    | Kerberos             | directory |             |
+389   | LDAP                 | directory |             |
+464   | Kerberos passwd      | directory |             | Kerberos password change (kpasswd)
+636   | LDAPS                | directory |             |
+3268  | AD Global Catalog    | directory |             |
+3269  | AD GC (LDAPS)        | directory |             |
+
+# Media and streaming
+554   | RTSP                 | media     |             |
+1400  | Sonos                | media     |             | Sonos speaker control
+1935  | RTMP                 | media     |             | Real-Time Messaging Protocol (streaming)
+3689  | DAAP                 | media     |             |
+7000  | AirPlay              | media     |             | Apple AirPlay receiver
+8009  | Chromecast           | media     |             | Google Cast device control
+8096  | Jellyfin / Emby      | media     |             | Jellyfin or Emby media server
+8554  | RTSP alt             | media     |             |
+32400 | Plex                 | media     |             |
+
+# Printing
+515   | LPD                  | printing  |             | Line Printer Daemon
+631   | IPP                  | printing  |             |
+9100  | JetDirect            | printing  |             | Raw printing (JetDirect); also Prometheus node_exporter
+
+# Messaging
+1883  | MQTT                 | messaging |             |
+5222  | XMPP client          | messaging |             |
+5269  | XMPP server          | messaging |             |
+5672  | AMQP                 | messaging |             | AMQP message broker (RabbitMQ)
+6667  | IRC                  | messaging |             | Internet Relay Chat
+8883  | MQTT (TLS)           | messaging |             |
+9092  | Kafka                | messaging |             | Apache Kafka broker
+
+# Voice and video calls
+3478  | STUN / TURN          | voip      |             |
+5060  | SIP                  | voip      |             |
+5061  | SIP (TLS)            | voip      |             |
+
+# Network services
+111   | rpcbind              | network   |             | ONC RPC port mapper (rpcbind)
+123   | NTP                  | network   |             |
+135   | MS RPC               | network   |             | Microsoft RPC endpoint mapper
+137   | NetBIOS name         | network   |             |
+161   | SNMP                 | network   |             |
+162   | SNMP trap            | network   |             |
+179   | BGP                  | network   |             |
+601   | Syslog               | network   |             |
+1900  | SSDP / UPnP          | network   |             | UPnP device discovery (SSDP)
+5040  | Windows CDP          | network   |             | Windows Connected Devices Platform service
+6514  | Syslog (TLS)         | network   |             |
+7547  | TR-069               | network   |             | ISP remote management of routers (CWMP)
+
+# VPN
+1194  | OpenVPN              | vpn       |             |
+1723  | PPTP                 | vpn       |             |
+
+# Proxies
+1080  | SOCKS                | proxy     |             |
+3128  | HTTP proxy           | proxy     |             | Common HTTP proxy port (Squid)
+
+# Smart home and devices
+1880  | Node-RED             | home      |             | Node-RED flow editor
+6053  | ESPHome              | home      |             | ESPHome native API
+8123  | Home Assistant       | home      |             | Home Assistant web UI
+62078 | Apple device sync    |           |             | iPhone and iPad Wi-Fi sync (lockdownd)

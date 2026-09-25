@@ -16,9 +16,10 @@ file is the full guide.
 3. [Build](#build)
 4. [Testing](#testing)
 5. [Release builds](#release-builds)
-6. [Linux test lab](#linux-test-lab)
-7. [Branches](#branches)
-8. [License](#license)
+6. [Lookup data](#lookup-data)
+7. [Linux test lab](#linux-test-lab)
+8. [Branches](#branches)
+9. [License](#license)
 
 ## Usage
 
@@ -54,6 +55,36 @@ IP               HOSTNAME                  MAC                MANUFACTURER
 
 When run without resolution flags, `ns -s` outputs the classic compact numerical list followed by the host count and elapsed time.
 
+### Port scans (`ns -p`)
+
+Open ports stream as they are found, then an aligned table closes the
+scan:
+
+```text
+Open port: 445 (SMB)
+Open port: 22 (SSH)
+Open port: 8123 (Home Assistant)
+PORT   SERVICE               IANA             DESCRIPTION
+22     SSH                   ssh              The Secure Shell (SSH) Protocol
+445    SMB                   microsoft-ds     Windows file sharing (SMB over TCP)
+8123   Home Assistant        -                Home Assistant web UI
+3 open ports (0.6s)
+```
+
+Names come from a table embedded in `ns`, so they cost no network
+lookups. It has two sources, kept apart:
+
+- **IANA** (`IANA` column): the service name officially registered for
+  the port in the
+  [IANA registry](https://www.iana.org/assignments/service-names-port-numbers/).
+  `-` means IANA assigns nothing there.
+- **Curated overlay** (`scripts/port_overlay.txt`): friendly labels
+  ("RDP" rather than `ms-wbt-server`), categories, and common uses of
+  ports IANA leaves unassigned or assigns to something else. Without an
+  overlay entry, `SERVICE` is the IANA name.
+
+`--timeout <ms>` caps each connect attempt (default 500).
+
 ### Machine-readable output (`--json`)
 
 Add `--json` to `-s` or `-p` for one JSON object per line on stdout
@@ -73,8 +104,20 @@ always last:
 - `host_detail` lines appear only with `--resolve`, `--hostname` or
   `--vendor`, one per host, after the sweep. Only requested fields are
   present; unresolved ones are `null`.
-- Port scans stream `{"type":"port","port":80}` and end with
-  `{"type":"summary","open_ports":[22,80],"elapsed_ms":512}`.
+- Port scans stream one `port` event per open port and end with
+  `{"type":"summary","open_ports":[22,3389],"elapsed_ms":512}`:
+
+  ```text
+  {"type":"port","port":22,"service":"SSH","iana":"ssh","description":"The Secure Shell (SSH) Protocol","category":"remote"}
+  {"type":"port","port":3389,"service":"RDP","iana":"ms-wbt-server","description":"Remote Desktop Protocol (Windows)","category":"remote"}
+  ```
+
+  `service` is the display name, `iana` the officially registered name
+  (`null` for ports known only from common use), and `category` one of
+  `web`, `remote`, `file`, `mail`, `dns`, `database`, `directory`,
+  `media`, `printing`, `messaging`, `voip`, `network`, `vpn`, `proxy`
+  or `home`. All four are always present and `null` when unknown.
+  Frontends should pick their own text for categories.
 - Input errors print `{"type":"error","message":"..."}` and exit with
   status 1. Diagnostics (warnings) stay on stderr as plain text.
 
@@ -125,6 +168,23 @@ Build releases on a Mac. `zig build` ad-hoc codesigns the macOS
 binaries, and without that signature macOS 27 hides the ARP table
 (no MAC addresses, manufacturers or quiet hosts). Cross-built macOS
 binaries are left unsigned.
+
+## Lookup data
+
+Manufacturer and port names come from pre-packed tables embedded in
+`ns` (`src/core/data/*.bin`). Regenerate them with Python 3; each
+script downloads its upstream source, or takes a local copy as its
+first argument to run offline:
+
+```sh
+python scripts/generate_oui.py     # Wireshark manuf -> oui.bin
+python scripts/generate_ports.py   # IANA registry + port_overlay.txt -> ports.bin
+```
+
+`generate_ports.py` prints which ports were added, removed or renamed;
+paste that into the PR. Curated port names live in
+`scripts/port_overlay.txt`, which documents its own format. Commit the
+regenerated `.bin` together with any overlay change.
 
 ## Linux test lab
 

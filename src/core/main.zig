@@ -1,6 +1,7 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
+const ports = @import("ports.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -122,13 +123,42 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
     } else if (open_ports.items.len == 0) {
         utils.printStdout(io, &stdout_mutex, "No open ports found\n", .{});
     } else {
-        utils.printStdout(io, &stdout_mutex, "Open ports: ", .{});
-        for (open_ports.items, 0..) |port, i| {
-            if (i > 0) utils.printStdout(io, &stdout_mutex, ", ", .{});
-            utils.printStdout(io, &stdout_mutex, "{d}", .{port});
-        }
-        utils.printStdout(io, &stdout_mutex, "\n", .{});
+        printPortTable(io, &stdout_mutex, open_ports.items, elapsed_ns);
     }
+}
+
+/// The closing recap of a text port scan: one row per open port with its
+/// display name, the IANA assignment (`-` when the name comes only from
+/// common use) and a description, then a count and the elapsed time.
+/// Takes the lock once so the table cannot interleave with anything.
+fn printPortTable(io: std.Io, stdout_mutex: *std.Io.Mutex, open_ports: []const u16, elapsed_ns: i96) void {
+    const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    const noun: []const u8 = if (open_ports.len == 1) "open port" else "open ports";
+
+    stdout_mutex.lockUncancelable(io);
+    defer stdout_mutex.unlock(io);
+    var buf: [1024]u8 = undefined;
+    var writer: std.Io.File.Writer = .initStreaming(.stdout(), io, &buf);
+    const out = &writer.interface;
+
+    // Labels are at most 20 characters and IANA names 15
+    // (scripts/generate_ports.py), so these widths keep columns aligned.
+    const row = "{s: <7}{s: <22}{s: <17}{s}\n";
+    out.print(row, .{ "PORT", "SERVICE", "IANA", "DESCRIPTION" }) catch return;
+    for (open_ports) |port| {
+        var port_buf: [5]u8 = undefined;
+        const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch unreachable;
+        const service = ports.lookup(port);
+        out.print(row, .{
+            port_str,
+            if (service) |s| s.name else "-",
+            if (service) |s| s.iana orelse "-" else "-",
+            if (service) |s| s.description orelse "-" else "-",
+        }) catch return;
+        out.flush() catch return;
+    }
+    out.print("{d} {s} ({d:.1}s)\n", .{ open_ports.len, noun, seconds }) catch {};
+    out.flush() catch {};
 }
 
 /// `ns -s <subnet> [options]`: find live hosts. Fast TCP + ARP discovery

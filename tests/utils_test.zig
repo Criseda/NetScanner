@@ -292,3 +292,16 @@ test "jsonEscape never cuts an escape sequence in half" {
     var buf: [4]u8 = undefined;
     try std.testing.expectEqualStrings("ab", utils.jsonEscape(&buf, "ab\x1bcd"));
 }
+
+test "jsonStringOrNull quotes present values and prints null for absent ones" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("\"ms-wbt-server\"", utils.jsonStringOrNull(&buf, "ms-wbt-server"));
+    try std.testing.expectEqualStrings("\"say \\\"hi\\\"\"", utils.jsonStringOrNull(&buf, "say \"hi\""));
+    try std.testing.expectEqualStrings("null", utils.jsonStringOrNull(&buf, null));
+    try std.testing.expectEqualStrings("\"\"", utils.jsonStringOrNull(&buf, ""));
+}
+
+test "jsonStringOrNull keeps both quotes when the value is cut" {
+    var buf: [5]u8 = undefined;
+    try std.testing.expectEqualStrings("\"abc\"", utils.jsonStringOrNull(&buf, "abcdef"));
+}

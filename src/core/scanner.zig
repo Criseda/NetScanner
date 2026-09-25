@@ -12,6 +12,7 @@ const Thread = std.Thread;
 const utils = @import("utils.zig");
 const c_bindings = @import("bindings");
 const oui = @import("oui.zig");
+const ports = @import("ports.zig");
 const resolver = @import("resolver.zig");
 
 pub const NetworkScanOptions = struct {
@@ -175,7 +176,7 @@ pub const ScanOptions = struct {
     /// unusually slow networks; lower it on a fast LAN for even
     /// quicker sweeps.
     timeout_ms: ?u16 = null,
-    /// Stream `{"type":"port",...}` lines instead of "Open port: N".
+    /// Stream `{"type":"port",...}` lines instead of "Open port: N (name)".
     json: bool = false,
 };
 
@@ -282,12 +283,24 @@ const PortShares = struct {
     json: bool,
 };
 
-/// One streamed port-scan hit, in text or JSON form.
+/// One streamed port-scan hit, in text or JSON form, named from the
+/// embedded port table. JSON always carries all four service fields
+/// (null when unknown) so consumers need no presence checks.
 fn printOpenPort(io: std.Io, stdout_mutex: *std.Io.Mutex, port: u16, json: bool) void {
+    const service = ports.lookup(port);
     if (json) {
-        utils.printStdout(io, stdout_mutex, "{{\"type\":\"port\",\"port\":{d}}}\n", .{port});
+        var bufs: [4][768]u8 = undefined;
+        utils.printStdout(io, stdout_mutex, "{{\"type\":\"port\",\"port\":{d},\"service\":{s},\"iana\":{s},\"description\":{s},\"category\":{s}}}\n", .{
+            port,
+            utils.jsonStringOrNull(&bufs[0], if (service) |s| s.name else null),
+            utils.jsonStringOrNull(&bufs[1], if (service) |s| s.iana else null),
+            utils.jsonStringOrNull(&bufs[2], if (service) |s| s.description else null),
+            utils.jsonStringOrNull(&bufs[3], if (service) |s| s.category else null),
+        });
+    } else if (service) |s| {
+        utils.printStdout(io, stdout_mutex, "Open port: {d} ({s})\n", .{ port, s.name });
     } else {
-        utils.printStdout(io, stdout_mutex, "Open port: {}\n", .{port});
+        utils.printStdout(io, stdout_mutex, "Open port: {d}\n", .{port});
     }
 }
 

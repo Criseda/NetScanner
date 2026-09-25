@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Port scans name the services they find:
+
+- Every open port is named from an embedded table of about 6,000 TCP
+  ports: the official IANA service registry, plus a curated overlay of
+  friendly labels, categories and common unofficial uses (RDP instead of
+  `ms-wbt-server`, Home Assistant on 8123). The two stay apart: the
+  official IANA name is always reported next to the label, and ports
+  known only from common use have none. No network lookups, no flags.
+- `--json` port events gain `service`, `iana`, `description` and
+  `category` (each `null` when unknown), e.g.
+  `{"type":"port","port":3389,"service":"RDP","iana":"ms-wbt-server",...}`.
+  Existing fields are unchanged; `summary.open_ports` is still a list of
+  numbers.
+- Text output streams `Open port: 3389 (RDP)`, and the closing
+  `Open ports: 22, 80` line is replaced by an aligned PORT / SERVICE /
+  IANA / DESCRIPTION table with a count and elapsed time, like `-s`.
+  **Behavior change** for scripts that scrape the text; use `--json`.
+- Generator tooling: `scripts/generate_ports.py` packs the IANA registry
+  and `scripts/port_overlay.txt` into `src/core/data/ports.bin`, and
+  prints which ports changed since the last run for the PR description.
+
 ## v1.3.0
 
 Machine-readable output for scripts and frontends, and reliable exit codes:

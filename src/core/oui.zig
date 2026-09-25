@@ -4,21 +4,14 @@
 
 const std = @import("std");
 const c_bindings = @import("bindings");
+const packed_db = @import("packed_db.zig");
 
 pub const OuiEntry = struct {
     prefix: [3]u8,
     vendor: []const u8,
 };
 
-pub const PackedHeader = extern struct {
-    magic: [4]u8,
-    version: u32,
-    entry_count: u32,
-    table_offset: u32,
-    strings_offset: u32,
-    strings_len: u32,
-};
-
+/// One record of oui.bin (header layout: see packed_db.zig).
 pub const PackedEntry = extern struct {
     prefix: [3]u8,
     name_len: u8,
@@ -26,68 +19,30 @@ pub const PackedEntry = extern struct {
 };
 
 /// Pre-packed binary database embedded directly into .rodata.
-const embedded_oui_bin = @embedFile("data/oui.bin");
+const db = packed_db.open(@embedFile("data/oui.bin"), "NSOU", 1, @sizeOf(PackedEntry));
 
-fn readHeader() PackedHeader {
-    if (embedded_oui_bin.len < @sizeOf(PackedHeader)) {
-        @compileError("embedded oui.bin is smaller than header size");
-    }
-    return .{
-        .magic = embedded_oui_bin[0..4].*,
-        .version = std.mem.readInt(u32, embedded_oui_bin[4..8], .little),
-        .entry_count = std.mem.readInt(u32, embedded_oui_bin[8..12], .little),
-        .table_offset = std.mem.readInt(u32, embedded_oui_bin[12..16], .little),
-        .strings_offset = std.mem.readInt(u32, embedded_oui_bin[16..20], .little),
-        .strings_len = std.mem.readInt(u32, embedded_oui_bin[20..24], .little),
-    };
-}
-
-const db_header = readHeader();
-
-comptime {
-    if (!std.mem.eql(u8, &db_header.magic, "NSOU")) {
-        @compileError("invalid magic in embedded oui.bin (expected NSOU)");
-    }
-    if (db_header.version != 1) {
-        @compileError("unsupported oui.bin format version");
-    }
-    const expected_table_len = @as(usize, db_header.entry_count) * @sizeOf(PackedEntry);
-    if (db_header.table_offset + expected_table_len > embedded_oui_bin.len) {
-        @compileError("oui.bin table extends beyond file size");
-    }
-    if (db_header.strings_offset != db_header.table_offset + expected_table_len) {
-        @compileError("oui.bin strings offset does not match table end");
-    }
-    if (db_header.strings_offset + db_header.strings_len > embedded_oui_bin.len) {
-        @compileError("oui.bin string pool extends beyond file size");
-    }
-}
-
-pub const EMBEDDED_COUNT: usize = db_header.entry_count;
-const db_table_bytes = embedded_oui_bin[db_header.table_offset..db_header.strings_offset];
-const db_string_pool = embedded_oui_bin[db_header.strings_offset .. db_header.strings_offset + db_header.strings_len];
+pub const EMBEDDED_COUNT: usize = db.entry_count;
 
 /// Search the embedded ~40,000 OUI database using binary search.
 /// Lookup is sub-microsecond (< 20ns) with zero memory allocations.
 pub fn lookupEmbeddedVendor(mac: [6]u8) ?[]const u8 {
     const target = [3]u8{ mac[0], mac[1], mac[2] };
     var low: usize = 0;
-    var high: usize = db_header.entry_count;
+    var high: usize = db.entry_count;
 
     while (low < high) {
         const mid = low + (high - low) / 2;
-        const entry_offset = mid * @sizeOf(PackedEntry);
-        const prefix = db_table_bytes[entry_offset .. entry_offset + 3];
+        const entry = db.record(mid);
 
-        const cmp = std.mem.order(u8, &target, prefix);
+        const cmp = std.mem.order(u8, &target, entry[0..3]);
         switch (cmp) {
             .lt => high = mid,
             .gt => low = mid + 1,
             .eq => {
-                const name_len = db_table_bytes[entry_offset + 3];
-                const name_offset = std.mem.readInt(u32, db_table_bytes[entry_offset + 4 .. entry_offset + 8][0..4], .little);
-                if (name_offset + name_len > db_string_pool.len) return null;
-                return db_string_pool[name_offset .. name_offset + name_len];
+                const name_len = entry[3];
+                const name_offset = std.mem.readInt(u32, entry[4..8], .little);
+                if (name_offset + name_len > db.strings.len) return null;
+                return db.strings[name_offset .. name_offset + name_len];
             },
         }
     }
