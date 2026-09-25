@@ -108,6 +108,18 @@ pub fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
     return buf[0..n];
 }
 
+/// `s` as a complete JSON value, written into `buf`: a quoted, escaped
+/// string, or `null` when `s` is absent. For optional fields, which
+/// `--json` prints as null rather than leaving out.
+pub fn jsonStringOrNull(buf: []u8, s: ?[]const u8) []const u8 {
+    const value = s orelse return "null";
+    if (buf.len < 2) return "null";
+    const escaped = jsonEscape(buf[1 .. buf.len - 1], value);
+    buf[0] = '"';
+    buf[escaped.len + 1] = '"';
+    return buf[0 .. escaped.len + 2];
+}
+
 pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
     var ip_bytes: [4]u8 = undefined;
     var byte: u8 = 0;
