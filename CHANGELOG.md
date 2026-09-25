@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `zig build` on macOS no longer prints "replacing existing signature" on
+  every run, which made successful builds look like failures. The binary is
+  now signed only when it changes, silently; codesign errors still show and
+  fail the build.
+
 ## v1.2.2
 
 MAC addresses and manufacturers work on macOS again (macOS 27 hid them):

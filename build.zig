@@ -5,13 +5,12 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = buildExe(b, target, optimize);
-    const install_exe = b.addInstallArtifact(exe, .{});
-    b.getInstallStep().dependOn(installAndSign(b, install_exe, .bin, target));
+    b.getInstallStep().dependOn(installExe(b, exe, .bin, target));
 
     // Note: on macOS `zig build run` never sees the ARP table (MAC and
     // manufacturer columns stay blank) because `zig` is the parent
     // process; run ./zig-out/bin/ns from a shell instead (see
-    // installAndSign).
+    // installExe).
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
@@ -42,11 +41,7 @@ pub fn build(b: *std.Build) void {
     for (releaseTargets()) |t| {
         const release_target = b.resolveTargetQuery(t.query);
         const release_exe = buildExe(b, release_target, optimize);
-        const dest_dir: std.Build.InstallDir = .{ .custom = t.dest_dir };
-        const install_release = b.addInstallArtifact(release_exe, .{
-            .dest_dir = .{ .override = dest_dir },
-        });
-        release_step.dependOn(installAndSign(b, install_release, dest_dir, release_target));
+        release_step.dependOn(installExe(b, release_exe, .{ .custom = t.dest_dir }, release_target));
     }
 }
 
@@ -58,8 +53,8 @@ fn needsCodesign(b: *std.Build, target: std.Build.ResolvedTarget) bool {
     return target.result.os.tag == .macos and b.graph.host.result.os.tag == .macos;
 }
 
-/// Install an artifact and, for macOS, ad-hoc codesign the installed
-/// copy with a reverse-DNS identifier. Returns the step to depend on.
+/// Install an executable and, for macOS, ad-hoc codesign it with a
+/// reverse-DNS identifier. Returns the step to depend on.
 ///
 /// Why: macOS 27 hides the kernel neighbour (ARP) table from
 /// third-party binaries unless they carry a real code identity. The
@@ -68,22 +63,43 @@ fn needsCodesign(b: *std.Build, target: std.Build.ResolvedTarget) bool {
 /// manufacturer columns and the quiet-host ARP harvest. The table is
 /// also hidden when a third-party program (rather than a shell) is the
 /// parent process, which no signature fixes. An ad-hoc signature needs
-/// no Apple developer account. The installed copy is signed, never the
-/// cached one, so the build cache stays untouched.
+/// no Apple developer account.
+///
+/// Signing works on a copy that the build step declares as its output,
+/// so Zig caches it: an unchanged binary is not re-signed. codesign's
+/// chatter ("replacing existing signature" on every run) is swallowed
+/// and only shown if signing fails, so a clean build prints nothing.
 ///
 /// Cross-building macOS releases on Linux or Windows leaves them
 /// unsigned (no `codesign` there); build releases on a Mac.
-fn installAndSign(
+fn installExe(
     b: *std.Build,
-    install: *std.Build.Step.InstallArtifact,
+    exe: *std.Build.Step.Compile,
     dest_dir: std.Build.InstallDir,
     target: std.Build.ResolvedTarget,
 ) *std.Build.Step {
-    if (!needsCodesign(b, target)) return &install.step;
-    const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--identifier", CODESIGN_IDENTIFIER });
-    sign.addArg(b.getInstallPath(dest_dir, install.artifact.out_filename));
-    sign.step.dependOn(&install.step);
-    return &sign.step;
+    if (!needsCodesign(b, target)) {
+        const install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dest_dir } });
+        return &install.step;
+    }
+    // $1 = linked binary, $2 = signed copy, $3 = identifier.
+    const sign = b.addSystemCommand(&.{
+        "/bin/sh",
+        "-c",
+        \\cp "$1" "$2" || exit 1
+        \\out=$(codesign --force --sign - --identifier "$3" "$2" 2>&1) || {
+        \\  printf '%s\n' "$out" >&2
+        \\  exit 1
+        \\}
+        ,
+        "codesign-ns",
+    });
+    sign.setName(b.fmt("codesign {s}", .{exe.out_filename}));
+    sign.addArtifactArg(exe);
+    const signed = sign.addOutputFileArg(exe.out_filename);
+    sign.addArg(CODESIGN_IDENTIFIER);
+    const install = b.addInstallFileWithDir(signed, dest_dir, exe.out_filename);
+    return &install.step;
 }
 
 const Libraries = struct {
