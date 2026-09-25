@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.4.0
 
 Port scans name the services they find:
 
@@ -14,7 +14,7 @@ Port scans name the services they find:
   `category` (each `null` when unknown), e.g.
   `{"type":"port","port":3389,"service":"RDP","iana":"ms-wbt-server",...}`.
   Existing fields are unchanged; `summary.open_ports` is still a list of
-  numbers.
+  numbers. NetScannerDesktop shows them as columns in its Port scan table.
 - Text output streams `Open port: 3389 (RDP)`, and the closing
   `Open ports: 22, 80` line is replaced by an aligned PORT / SERVICE /
   IANA / DESCRIPTION table with a count and elapsed time, like `-s`.
