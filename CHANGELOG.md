@@ -11,8 +11,9 @@
   only increases, and each phase ends with one `done == total` event.
   Existing events are unchanged and text output is unaffected.
 - In a terminal, text scans show a live status line instead of printing
-  every result as it is found, e.g. `| Scanning 192.168.1.0/24 (7 hosts
-  found, 42%)`, then `Identifying devices (3 of 9)` during `--resolve`.
+  every result as it is found, e.g. `⠹ Scanning 192.168.1.0/24… 42% ·
+  7 hosts found`, then `Identifying devices… 3 of 9` during `--resolve`
+  (ASCII where the terminal is not UTF-8).
   Results print once, in the closing summary, so hosts and ports are no
   longer listed twice. **Behavior change** for terminals only: piped or
   redirected output and `--json` still stream line by line, exactly as
