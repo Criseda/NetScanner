@@ -3,7 +3,8 @@ const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
 const ports = @import("ports.zig");
 const interrupt = @import("interrupt.zig");
-const Live = @import("live.zig").Live;
+const live_status = @import("live.zig");
+const Live = live_status.Live;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -26,9 +27,9 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         try utils.printVersion(io);
     } else if (std.mem.eql(u8, command, "-p")) {
-        try runPortScan(gpa, io, args, json);
+        try runPortScan(gpa, io, init.environ_map, args, json);
     } else if (std.mem.eql(u8, command, "-s")) {
-        try runSubnetScan(gpa, io, args, json);
+        try runSubnetScan(gpa, io, init.environ_map, args, json);
     } else {
         try utils.printUsage(io);
         std.process.exit(1);
@@ -80,7 +81,7 @@ fn fail(io: std.Io, json: bool, comptime fmt: []const u8, args: anytype) noretur
 /// `ns -p <ip> <port-range> [--timeout <ms>] [--json]`: scan one host
 /// for open ports. The timeout caps each probe (default 500ms); raise it
 /// on slow networks, lower it on fast LANs for quicker sweeps.
-fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8, json: bool) !void {
+fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, args: []const [:0]const u8, json: bool) !void {
     if (args.len < 4) {
         if (json) fail(io, json, "Usage: ns -p <ip> <port-range>", .{});
         try utils.printUsage(io);
@@ -125,6 +126,7 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
     const interactive = wantsStatusLine(io, json);
     if (interactive) {
         interrupt.install();
+        live.glyphs = live_status.glyphs(io, env);
         live.begin();
     }
     defer live.finish();
@@ -202,7 +204,7 @@ fn printPortTable(io: std.Io, stdout_mutex: *std.Io.Mutex, open_ports: []const u
 /// `ns -s <subnet> [options]`: find live hosts. Fast TCP + ARP discovery
 /// by default, one-ping-per-host with --ping. Optional --resolve,
 /// --hostname, --vendor, --oui-file and --json.
-fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8, json: bool) !void {
+fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, args: []const [:0]const u8, json: bool) !void {
     if (args.len < 3) {
         if (json) fail(io, json, "Usage: ns -s <subnet>", .{});
         try utils.printUsage(io);
@@ -244,6 +246,7 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]con
     // The scan starts the line itself, after printing its header.
     if (wantsStatusLine(io, json)) {
         interrupt.install();
+        live.glyphs = live_status.glyphs(io, env);
         scan_options.live = &live;
     }
     defer live.finish();

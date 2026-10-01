@@ -89,12 +89,19 @@ When `ns` writes text to a terminal, it shows one self-updating line on
 stderr instead of printing each result as it is found:
 
 ```text
-| Scanning 192.168.1.0/24 (7 hosts found, 42%)
-/ Identifying devices (3 of 9)
+⠹ Scanning 192.168.1.0/24… 42% · 7 hosts found
+⠼ Identifying devices… 3 of 9
 ```
 
 The line is cleared when the scan ends, and the results print once, as
 the summary. Scans that finish in under 0.2s never show it.
+
+The spinner and punctuation need a UTF-8 terminal. On macOS and Linux
+that is read from the locale (`LC_ALL`, `LC_CTYPE`, then `LANG`, e.g.
+`en_GB.UTF-8`); on Windows, from the console's code page (65001 is
+UTF-8). Anywhere else the line falls back to ASCII:
+`| Scanning 192.168.1.0/24... 42% - 7 hosts found`. `ns` never changes
+the console's code page itself.
 
 Press **Ctrl+C** to stop early. Probes already in flight finish (each
 is capped by its timeout), then the results so far print with
