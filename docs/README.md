@@ -118,6 +118,25 @@ always last:
   `media`, `printing`, `messaging`, `voip`, `network`, `vpn`, `proxy`
   or `home`. All four are always present and `null` when unknown.
   Frontends should pick their own text for categories.
+- `progress` events report how far a scan has got, since results alone
+  cannot (closed ports and silent IPs print nothing):
+
+  ```text
+  {"type":"progress","phase":"sweep","done":120,"total":254}
+  ```
+
+  | Scan | `phase` | `done` / `total` |
+  |---|---|---|
+  | `-p` | `ports` | ports probed / ports in range |
+  | `-s` (TCP or `--ping`) | `sweep` | IPs probed / usable hosts |
+  | `-s --resolve` / `--hostname` | `identify` | hosts resolved / hosts found |
+
+  An event goes out only when the whole percentage changes, so a phase
+  emits at most about 100 lines whatever its size. Within a phase `done`
+  only increases, and each phase ends with exactly one `done == total`
+  event. A phase may skip counts, so show the latest event rather than
+  counting them. Phases arrive in table order, and `summary` still comes
+  last. Text output has no progress lines.
 - Input errors print `{"type":"error","message":"..."}` and exit with
   status 1. Diagnostics (warnings) stay on stderr as plain text.
 
