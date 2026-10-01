@@ -57,13 +57,11 @@ When run without resolution flags, `ns -s` outputs the classic compact numerical
 
 ### Port scans (`ns -p`)
 
-Open ports stream as they are found, then an aligned table closes the
-scan:
+In a terminal, a status line shows progress while the scan runs (see
+[Status line and Ctrl+C](#status-line-and-ctrlc)), then an aligned
+table closes the scan:
 
 ```text
-Open port: 445 (SMB)
-Open port: 22 (SSH)
-Open port: 8123 (Home Assistant)
 PORT   SERVICE               IANA             DESCRIPTION
 22     SSH                   ssh              The Secure Shell (SSH) Protocol
 445    SMB                   microsoft-ds     Windows file sharing (SMB over TCP)
@@ -84,6 +82,32 @@ lookups. It has two sources, kept apart:
   overlay entry, `SERVICE` is the IANA name.
 
 `--timeout <ms>` caps each connect attempt (default 500).
+
+### Status line and Ctrl+C
+
+When `ns` writes text to a terminal, it shows one self-updating line on
+stderr instead of printing each result as it is found:
+
+```text
+| Scanning 192.168.1.0/24 (7 hosts found, 42%)
+/ Identifying devices (3 of 9)
+```
+
+The line is cleared when the scan ends, and the results print once, as
+the summary. Scans that finish in under 0.2s never show it.
+
+Press **Ctrl+C** to stop early. Probes already in flight finish (each
+is capped by its timeout), then the results so far print with
+`interrupted` on the closing line, e.g. `7 hosts up (1.5s, interrupted)`.
+Press Ctrl+C again to quit at once. Either way `ns` exits as an
+interrupted program does (killed by SIGINT, status 130 in shells;
+`STATUS_CONTROL_C_EXIT` on Windows), so scripts never mistake a stopped
+scan for a complete one.
+
+Piped or redirected output (`ns -s ... > hosts.txt`, `| grep`) and
+`--json` keep streaming every result line by line, with no status line,
+and Ctrl+C stops them immediately as before. The same applies when
+stderr alone is redirected.
 
 ### Machine-readable output (`--json`)
 

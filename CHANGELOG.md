@@ -10,6 +10,19 @@
   the whole percentage changes, at most about 100 per phase. `done`
   only increases, and each phase ends with one `done == total` event.
   Existing events are unchanged and text output is unaffected.
+- In a terminal, text scans show a live status line instead of printing
+  every result as it is found, e.g. `| Scanning 192.168.1.0/24 (7 hosts
+  found, 42%)`, then `Identifying devices (3 of 9)` during `--resolve`.
+  Results print once, in the closing summary, so hosts and ports are no
+  longer listed twice. **Behavior change** for terminals only: piped or
+  redirected output and `--json` still stream line by line, exactly as
+  before.
+- Ctrl+C on a scan in a terminal now stops it and prints what it found
+  so far, marked `interrupted` (e.g. `7 hosts up (1.5s, interrupted)`),
+  instead of discarding it. A second Ctrl+C quits at once. `ns` still
+  exits as interrupted (SIGINT; `STATUS_CONTROL_C_EXIT` on Windows), so
+  scripts see the stop. If SIGINT was ignored at startup (`nohup`), it
+  stays ignored.
 
 ## v1.4.0
 
