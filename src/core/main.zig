@@ -2,6 +2,9 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
 const ports = @import("ports.zig");
+const interrupt = @import("interrupt.zig");
+const live_status = @import("live.zig");
+const Live = live_status.Live;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -24,13 +27,32 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         try utils.printVersion(io);
     } else if (std.mem.eql(u8, command, "-p")) {
-        try runPortScan(gpa, io, args, json);
+        try runPortScan(gpa, io, init.environ_map, args, json);
     } else if (std.mem.eql(u8, command, "-s")) {
-        try runSubnetScan(gpa, io, args, json);
+        try runSubnetScan(gpa, io, init.environ_map, args, json);
     } else {
         try utils.printUsage(io);
         std.process.exit(1);
     }
+}
+
+/// Whether to show the status line (live.zig) instead of streaming
+/// each result: only for text output with both stdout and stderr on a
+/// terminal. Piped or redirected output keeps streaming line by line,
+/// so scripts and `> hosts.txt` see exactly what they always did, and
+/// so does a terminal with `TERM=dumb`, which cannot redraw a line.
+fn wantsStatusLine(io: std.Io, env: *const std.process.Environ.Map, json: bool) bool {
+    if (json) return false;
+    if (live_status.isDumbTerminal(env.get("TERM"))) return false;
+    const stdout_tty = std.Io.File.stdout().isTty(io) catch return false;
+    const stderr_tty = std.Io.File.stderr().isTty(io) catch return false;
+    return stdout_tty and stderr_tty;
+}
+
+/// "Scanning <target>" for the status line, in caller storage that
+/// outlives the scan. Falls back to a bare verb if the target is long.
+fn scanLabel(buf: []u8, target: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "Scanning {s}", .{target}) catch "Scanning";
 }
 
 fn hasFlag(args: []const [:0]const u8, flag: []const u8) bool {
@@ -61,7 +83,7 @@ fn fail(io: std.Io, json: bool, comptime fmt: []const u8, args: anytype) noretur
 /// `ns -p <ip> <port-range> [--timeout <ms>] [--json]`: scan one host
 /// for open ports. The timeout caps each probe (default 500ms); raise it
 /// on slow networks, lower it on fast LANs for quicker sweeps.
-fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8, json: bool) !void {
+fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, args: []const [:0]const u8, json: bool) !void {
     if (args.len < 4) {
         if (json) fail(io, json, "Usage: ns -p <ip> <port-range>", .{});
         try utils.printUsage(io);
@@ -99,6 +121,18 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
 
     const ip_address = [4]u8{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] };
 
+    var label_buf: [64]u8 = undefined;
+    var live: Live = .init(io, .{ .one = "open port", .many = "open ports" }, .{
+        .label = scanLabel(&label_buf, args[2]),
+    });
+    const interactive = wantsStatusLine(io, env, json);
+    if (interactive) {
+        interrupt.install();
+        live.glyphs = live_status.glyphs(io, env);
+        live.begin();
+    }
+    defer live.finish();
+
     const started = std.Io.Clock.now(.awake, io);
     var open_ports = try scanner.scanPorts(
         allocator,
@@ -106,10 +140,16 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
         ip_address,
         port_array[0],
         port_array[1],
-        .{ .timeout_ms = timeout_ms, .json = json },
+        .{
+            .timeout_ms = timeout_ms,
+            .json = json,
+            .progress = !interactive,
+            .live = if (interactive) &live else null,
+        },
     );
     defer open_ports.deinit(allocator);
     const elapsed_ns = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
+    live.finish();
 
     var stdout_mutex: std.Io.Mutex = .init;
     if (json) {
@@ -121,10 +161,12 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const
         }
         utils.printStdout(io, &stdout_mutex, "],\"elapsed_ms\":{d}}}\n", .{elapsed_ms});
     } else if (open_ports.items.len == 0) {
-        utils.printStdout(io, &stdout_mutex, "No open ports found\n", .{});
+        const note: []const u8 = if (interrupt.requested()) " (interrupted)" else "";
+        utils.printStdout(io, &stdout_mutex, "No open ports found{s}\n", .{note});
     } else {
         printPortTable(io, &stdout_mutex, open_ports.items, elapsed_ns);
     }
+    if (interrupt.requested()) interrupt.exitInterrupted();
 }
 
 /// The closing recap of a text port scan: one row per open port with its
@@ -157,14 +199,14 @@ fn printPortTable(io: std.Io, stdout_mutex: *std.Io.Mutex, open_ports: []const u
         }) catch return;
         out.flush() catch return;
     }
-    out.print("{d} {s} ({d:.1}s)\n", .{ open_ports.len, noun, seconds }) catch {};
+    out.print("{d} {s} ({d:.1}s{s})\n", .{ open_ports.len, noun, seconds, scanner.interruptedNote() }) catch {};
     out.flush() catch {};
 }
 
 /// `ns -s <subnet> [options]`: find live hosts. Fast TCP + ARP discovery
 /// by default, one-ping-per-host with --ping. Optional --resolve,
 /// --hostname, --vendor, --oui-file and --json.
-fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8, json: bool) !void {
+fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, args: []const [:0]const u8, json: bool) !void {
     if (args.len < 3) {
         if (json) fail(io, json, "Usage: ns -s <subnet>", .{});
         try utils.printUsage(io);
@@ -199,6 +241,18 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]con
         }
     }
 
+    var label_buf: [64]u8 = undefined;
+    var live: Live = .init(io, .{ .one = "host found", .many = "hosts found" }, .{
+        .label = scanLabel(&label_buf, cidr),
+    });
+    // The scan starts the line itself, after printing its header.
+    if (wantsStatusLine(io, env, json)) {
+        interrupt.install();
+        live.glyphs = live_status.glyphs(io, env);
+        scan_options.live = &live;
+    }
+    defer live.finish();
+
     // A bad subnet used to escape as a raw Zig error trace; report it
     // like every other input error instead.
     const result = if (use_ping)
@@ -209,4 +263,5 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]con
         error.InvalidCidr, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidCharacter, error.Overflow => fail(io, json, "Invalid subnet '{s}' (use CIDR like 192.168.1.0/24)", .{cidr}),
         else => return err,
     };
+    if (interrupt.requested()) interrupt.exitInterrupted();
 }

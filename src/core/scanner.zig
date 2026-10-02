@@ -14,6 +14,9 @@ const c_bindings = @import("bindings");
 const oui = @import("oui.zig");
 const ports = @import("ports.zig");
 const resolver = @import("resolver.zig");
+const progress = @import("progress.zig");
+const interrupt = @import("interrupt.zig");
+const Live = @import("live.zig").Live;
 
 pub const NetworkScanOptions = struct {
     resolve_hostname: bool = false,
@@ -22,6 +25,9 @@ pub const NetworkScanOptions = struct {
     /// Emit one JSON object per line (`--json`) instead of the
     /// human-readable text, for programs that drive `ns`.
     json: bool = false,
+    /// Interactive status line. With it, hosts are counted on the line
+    /// instead of streamed, and the summary is the only result output.
+    live: ?*Live = null,
 };
 
 /// How many port-scan workers run at once. One fixed worker per
@@ -158,55 +164,15 @@ fn tcpConnectTimeout(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
 // silent IPs print nothing), so the engine counts finished work itself.
 // ---------------------------------------------------------------------------
 
-/// True when finishing unit `done` of `total` moves the whole
-/// percentage, so at most 100 events go out per phase whatever its
-/// size (and every unit when there are fewer than 100). The last unit
-/// always crosses into 100%.
-pub fn crossesPercent(done: usize, total: usize) bool {
-    if (total == 0 or done == 0 or done > total) return false;
-    // u64 keeps done * 100 from overflowing on 32-bit targets.
-    const now = @as(u64, done) * 100 / total;
-    const before = @as(u64, done - 1) * 100 / total;
-    return now != before;
-}
-
-/// Counts finished units of one scan phase across worker threads.
-/// Workers call advance() after every probe; the one whose unit crosses
-/// a percent boundary takes the stdout lock and calls claim(), which
-/// reports the newest count rather than its own. That keeps printed
-/// counts strictly increasing even when workers reach the lock out of
-/// order, and prints `done == total` exactly once.
-pub const ProgressMeter = struct {
-    /// `ports`, `sweep` or `identify` (see docs/README.md).
-    phase: []const u8,
-    total: usize,
-    done: std.atomic.Value(usize) = .init(0),
-    /// Last count claimed. Guarded by the lock the caller holds around
-    /// claim() (the stdout mutex in the scanner).
-    last_claimed: usize = 0,
-
-    /// Record one finished unit. True when the caller should emit.
-    pub fn advance(self: *ProgressMeter) bool {
-        const done = self.done.fetchAdd(1, .monotonic) + 1;
-        return crossesPercent(done, self.total);
-    }
-
-    /// The count to print, or null when a newer one is already out.
-    /// Call with the output lock held.
-    pub fn claim(self: *ProgressMeter) ?usize {
-        const done = @min(self.done.load(.monotonic), self.total);
-        if (done <= self.last_claimed) return null;
-        self.last_claimed = done;
-        return done;
-    }
-};
+pub const crossesPercent = progress.crossesPercent;
+pub const ProgressMeter = progress.ProgressMeter;
 
 /// Count one finished unit and, when it crosses a percent boundary,
-/// print `{"type":"progress","phase":...,"done":N,"total":M}`. A null
-/// meter (text output, or quiet test scans) makes this a no-op.
+/// print `{"type":"progress","phase":...,"done":N,"total":M}` when the
+/// meter emits JSON. Without JSON the count still feeds the status line.
 fn advanceProgress(io: std.Io, stdout_mutex: *std.Io.Mutex, meter: ?*ProgressMeter) void {
     const m = meter orelse return;
-    if (!m.advance()) return;
+    if (!m.advance() or !m.emit_json) return;
     stdout_mutex.lockUncancelable(io);
     defer stdout_mutex.unlock(io);
     const done = m.claim() orelse return;
@@ -245,6 +211,10 @@ pub const ScanOptions = struct {
     /// Stream `{"type":"port",...}` lines instead of "Open port: N (name)",
     /// plus `progress` events (phase `ports`) when `progress` is on.
     json: bool = false,
+    /// Interactive status line. The caller owns it and sets the phase;
+    /// workers count open ports on it. Normally paired with
+    /// progress = false, since the summary prints the ports anyway.
+    live: ?*Live = null,
 };
 
 pub fn scanPorts(
@@ -262,8 +232,11 @@ pub fn scanPorts(
     const timeout_ms: c_int = if (options.timeout_ms) |t| t else PORT_TIMEOUT_MS;
 
     const total: usize = @as(usize, end_port) - start_port + 1;
-    var meter: ProgressMeter = .{ .phase = "ports", .total = total };
-    const meter_ptr: ?*ProgressMeter = if (options.json and options.progress) &meter else null;
+    var meter: ProgressMeter = .{ .phase = "ports", .total = total, .emit_json = options.json and options.progress };
+    if (options.live) |live| live.setMeter(&meter);
+    // The caller's status line outlives this frame: detach on every
+    // return path, so its ticker never reads a dead meter.
+    defer if (options.live) |live| live.setMeter(null);
 
     if (start_port == end_port) {
         // One port needs no pool: probe it directly instead of
@@ -275,9 +248,10 @@ pub fn scanPorts(
             if (options.progress) {
                 printOpenPort(io, &stdout_mutex, start_port, options.json);
             }
+            if (options.live) |live| live.addFound();
             try open_ports.append(allocator, start_port);
         }
-        advanceProgress(io, &stdout_mutex, meter_ptr);
+        advanceProgress(io, &stdout_mutex, &meter);
         return open_ports;
     }
 
@@ -317,7 +291,8 @@ pub fn scanPorts(
         .progress = options.progress,
         .timeout_ms = timeout_ms,
         .json = options.json,
-        .meter = meter_ptr,
+        .meter = &meter,
+        .live = options.live,
     };
     for (0..worker_count) |_| {
         const t = try Thread.spawn(.{}, portWorker, .{shares});
@@ -353,7 +328,8 @@ const PortShares = struct {
     progress: bool,
     timeout_ms: c_int,
     json: bool,
-    meter: ?*ProgressMeter,
+    meter: *ProgressMeter,
+    live: ?*Live,
 };
 
 /// One streamed port-scan hit, in text or JSON form, named from the
@@ -382,9 +358,10 @@ fn printOpenPort(io: std.Io, stdout_mutex: *std.Io.Mutex, port: u16, json: bool)
 /// "not open" and stay silent, which also keeps large filtered ranges
 /// from drowning in per-port stderr lines. Every probed port counts
 /// toward progress, open or not, and only after its `port` event, so a
-/// frontend never sees 100% before the last hit.
+/// frontend never sees 100% before the last hit. Ctrl+C on an
+/// interactive scan stops the pool from taking new ports.
 fn portWorker(shares: PortShares) void {
-    while (true) {
+    while (!interrupt.requested()) {
         const port_num = shares.next_port.fetchAdd(1, .monotonic);
         if (port_num > shares.end) break;
         const port: u16 = @intCast(port_num);
@@ -399,6 +376,7 @@ fn recordOpenPort(shares: PortShares, port: u16) void {
     if (shares.progress) {
         printOpenPort(shares.io, shares.stdout_mutex, port, shares.json);
     }
+    if (shares.live) |live| live.addFound();
     shares.ports_mutex.lockUncancelable(shares.io);
     defer shares.ports_mutex.unlock(shares.io);
     shares.open_ports.append(shares.allocator, port) catch |err| {
@@ -425,13 +403,19 @@ const Discovery = struct {
     ip_mac_map: *std.AutoHashMap([4]u8, [6]u8),
     ip_mac_mutex: *std.Io.Mutex,
     json: bool,
+    live: ?*Live,
 
-    /// Record a host as found and print it, tagged with how it was found.
+    /// Record a host as found and print it, tagged with how it was
+    /// found -- or, with the status line on, just count it there.
     fn reportHost(self: Discovery, ip: [4]u8, comptime source: HostSource) void {
         self.found_mutex.lockUncancelable(self.io);
         defer self.found_mutex.unlock(self.io);
         self.found.append(self.allocator, ip) catch return;
-        printHost(self.io, self.stdout_mutex, ip, source, self.json);
+        if (self.live) |live| {
+            live.addFound();
+        } else {
+            printHost(self.io, self.stdout_mutex, ip, source, self.json);
+        }
     }
 
     fn isFound(self: Discovery, ip: [4]u8) bool {
@@ -472,13 +456,14 @@ fn printHost(io: std.Io, stdout_mutex: *std.Io.Mutex, ip: [4]u8, comptime source
 /// Run the TCP probe once per IP in the list and wait for every
 /// worker before returning. A fixed pool pulls indexes from a shared
 /// atomic counter, so a /16 needs only MAX_TCP_THREADS threads
-/// instead of one per IP. With a meter, every probed IP counts toward
-/// the `sweep` phase, answered or not.
+/// instead of one per IP. Every probed IP counts toward the `sweep`
+/// meter, answered or not. Ctrl+C on an interactive scan stops the
+/// pool from taking new IPs.
 fn sweepHosts(
     allocator: std.mem.Allocator,
     shares: Discovery,
     ips: []const [4]u8,
-    meter: ?*ProgressMeter,
+    meter: *ProgressMeter,
 ) void {
     if (ips.len == 0) return;
     const worker_count: usize = @min(ips.len, MAX_TCP_THREADS);
@@ -488,7 +473,7 @@ fn sweepHosts(
         base: Discovery,
         ips: []const [4]u8,
         next: *std.atomic.Value(usize),
-        meter: ?*ProgressMeter,
+        meter: *ProgressMeter,
     };
     const sweep = SweepShares{
         .base = shares,
@@ -498,7 +483,7 @@ fn sweepHosts(
     };
     const sweepWorker = struct {
         fn run(s: SweepShares) void {
-            while (true) {
+            while (!interrupt.requested()) {
                 const i = s.next.fetchAdd(1, .monotonic);
                 if (i >= s.ips.len) break;
                 tcpWorker(s.base, s.ips[i]);
@@ -552,7 +537,7 @@ fn printSummary(io: std.Io, stdout_mutex: *std.Io.Mutex, found: [][4]u8, elapsed
         out.print("{d}.{d}.{d}.{d}\n", .{ ip[0], ip[1], ip[2], ip[3] }) catch return;
         out.flush() catch return;
     }
-    out.print("{d} {s} up ({d:.1}s)\n", .{ found.len, noun, seconds }) catch {};
+    out.print("{d} {s} up ({d:.1}s{s})\n", .{ found.len, noun, seconds, interruptedNote() }) catch {};
     out.flush() catch {};
 }
 
@@ -638,14 +623,17 @@ fn printDetailedSummary(
     // of a --resolve scan (seconds after the sweep is done), so JSON
     // output reports it as its own `identify` progress phase.
     if (options.resolve_hostname and details.len > 0) {
-        var meter: ProgressMeter = .{ .phase = "identify", .total = details.len };
+        var meter: ProgressMeter = .{ .phase = "identify", .total = details.len, .emit_json = options.json };
+        if (options.live) |live| live.setPhase(.{ .label = "Identifying devices", .meter = &meter, .style = .count });
+        // The meter ends with this block; the status line does not.
+        defer if (options.live) |live| live.setMeter(null);
         const Job = struct {
             allocator: std.mem.Allocator,
             io: std.Io,
             stdout_mutex: *std.Io.Mutex,
             details: []HostDetail,
             next: *std.atomic.Value(usize),
-            meter: ?*ProgressMeter,
+            meter: *ProgressMeter,
         };
         var next_idx: std.atomic.Value(usize) = .init(0);
         const job = Job{
@@ -654,11 +642,11 @@ fn printDetailedSummary(
             .stdout_mutex = stdout_mutex,
             .details = details,
             .next = &next_idx,
-            .meter = if (options.json) &meter else null,
+            .meter = &meter,
         };
         const worker = struct {
             fn run(j: Job) void {
-                while (true) {
+                while (!interrupt.requested()) {
                     const idx = j.next.fetchAdd(1, .monotonic);
                     if (idx >= j.details.len) break;
                     j.details[idx].hostname = resolver.resolveHostName(j.allocator, j.details[idx].ip);
@@ -686,6 +674,9 @@ fn printDetailedSummary(
             worker(job);
         }
     }
+
+    // Resolution is done: clear the status line before the table.
+    if (options.live) |live| live.finish();
 
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
     const noun: []const u8 = if (details.len == 1) "host" else "hosts";
@@ -766,8 +757,14 @@ fn printDetailedSummary(
         }
     }
 
-    out.print("{d} {s} up ({d:.1}s)\n", .{ details.len, noun, seconds }) catch {};
+    out.print("{d} {s} up ({d:.1}s{s})\n", .{ details.len, noun, seconds, interruptedNote() }) catch {};
     out.flush() catch {};
+}
+
+/// Appended to a text summary's closing line after Ctrl+C, so partial
+/// results never pass for a complete scan.
+pub fn interruptedNote() []const u8 {
+    return if (interrupt.requested()) ", interrupted" else "";
 }
 
 fn ipLessThan(_: void, a: [4]u8, b: [4]u8) bool {
@@ -818,16 +815,23 @@ fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, ra
 ///
 /// With a meter, each reaped child counts toward progress. Children are
 /// reaped in input order, so `done` advances in order rather than as
-/// each ping finishes; the percentage is still honest.
+/// each ping finishes; the percentage is still honest. With a status
+/// line, each host that answered is counted on it as it is reaped, so
+/// the found count climbs with the percentage. After Ctrl+C on an
+/// interactive scan no more pings start, and those already running
+/// still finish (see the reap loop).
 fn pingSweep(
     allocator: std.mem.Allocator,
     io: std.Io,
     ips: []const [4]u8,
     stdout_mutex: *std.Io.Mutex,
     meter: ?*ProgressMeter,
+    live: ?*Live,
 ) ![]bool {
     const alive = try allocator.alloc(bool, ips.len);
     errdefer allocator.free(alive);
+    // Hosts never pinged (the sweep was stopped) count as unanswered.
+    @memset(alive, false);
 
     const ip_strings = try allocator.alloc([]const u8, ips.len);
     defer {
@@ -841,6 +845,7 @@ fn pingSweep(
     var children: std.ArrayList(std.process.Child) = .empty;
     defer children.deinit(allocator);
     for (ip_strings) |ip_string| {
+        if (interrupt.requested()) break;
         var argv: [7][]const u8 = undefined;
         const argc: usize = if (comptime builtin.os.tag == .windows) blk: {
             argv[0..6].* = [_][]const u8{ "ping", "-n", "1", "-w", "1000", ip_string };
@@ -861,16 +866,21 @@ fn pingSweep(
         try children.append(allocator, child);
     }
 
+    // Waited for even after Ctrl+C, never killed: killing would discard
+    // the exit status of pings that had already answered, and their
+    // hosts with it. The wait is short. A terminal Ctrl+C reaches the
+    // pings too (they share ns's process group or console), and each
+    // one is capped at about 1s anyway.
     for (children.items, 0..) |*child, i| {
         defer advanceProgress(io, stdout_mutex, meter);
-        const term = child.wait(io) catch {
-            alive[i] = false;
-            continue;
-        };
+        const term = child.wait(io) catch continue;
         alive[i] = switch (term) {
             .exited => |code| code == 0,
             else => false,
         };
+        if (alive[i]) {
+            if (live) |l| l.addFound();
+        }
     }
     return alive;
 }
@@ -888,6 +898,8 @@ pub fn scanNetworkPing(
 
     var stdout_mutex: std.Io.Mutex = .init;
     printScanHeader(io, &stdout_mutex, cidr, ip_range, options.json);
+    // After the header: nothing else reaches stdout until the summary.
+    if (options.live) |live| live.begin();
     const started = std.Io.Clock.now(.awake, io);
 
     // Single-threaded from here: one batch, then report. No locks needed
@@ -896,8 +908,12 @@ pub fn scanNetworkPing(
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
 
-    var meter: ProgressMeter = .{ .phase = "sweep", .total = targets.items.len };
-    const alive = try pingSweep(allocator, io, targets.items, &stdout_mutex, if (options.json) &meter else null);
+    var meter: ProgressMeter = .{ .phase = "sweep", .total = targets.items.len, .emit_json = options.json };
+    if (options.live) |live| live.setMeter(&meter);
+    // The caller's status line outlives this frame, including on the
+    // error return just below.
+    defer if (options.live) |live| live.setMeter(null);
+    const alive = try pingSweep(allocator, io, targets.items, &stdout_mutex, &meter, options.live);
     defer allocator.free(alive);
 
     var found: std.ArrayList([4]u8) = .empty;
@@ -905,7 +921,8 @@ pub fn scanNetworkPing(
     for (targets.items, alive) |ip, is_up| {
         if (!is_up) continue;
         found.append(allocator, ip) catch continue;
-        printHost(io, &stdout_mutex, ip, .ping, options.json);
+        // With the status line on, pingSweep already counted the host.
+        if (options.live == null) printHost(io, &stdout_mutex, ip, .ping, options.json);
     }
 
     var ip_mac_map = std.AutoHashMap([4]u8, [6]u8).init(allocator);
@@ -926,6 +943,7 @@ pub fn scanNetworkPing(
     if (options.resolve_hostname or options.resolve_vendor) {
         printDetailedSummary(allocator, io, &stdout_mutex, found.items, &ip_mac_map, options, elapsed);
     } else {
+        if (options.live) |live| live.finish();
         printSummary(io, &stdout_mutex, found.items, elapsed, options.json);
     }
 }
@@ -975,6 +993,8 @@ pub fn scanNetwork(
 
     var stdout_mutex: std.Io.Mutex = .init;
     printScanHeader(io, &stdout_mutex, cidr, ip_range, options.json);
+    // After the header: nothing else reaches stdout until the summary.
+    if (options.live) |live| live.begin();
     const started = std.Io.Clock.now(.awake, io);
 
     const hosts = utils.usableHosts(network, ip_range);
@@ -995,18 +1015,25 @@ pub fn scanNetwork(
         .ip_mac_map = &ip_mac_map,
         .ip_mac_mutex = &ip_mac_mutex,
         .json = options.json,
+        .live = options.live,
     };
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
-    var meter: ProgressMeter = .{ .phase = "sweep", .total = targets.items.len };
-    sweepHosts(allocator, shares, targets.items, if (options.json) &meter else null);
+    var meter: ProgressMeter = .{ .phase = "sweep", .total = targets.items.len, .emit_json = options.json };
+    if (options.live) |live| live.setMeter(&meter);
+    // The caller's status line outlives this frame. (The ARP phase
+    // below also replaces the meter; this keeps the rule local.)
+    defer if (options.live) |live| live.setMeter(null);
+    sweepHosts(allocator, shares, targets.items, &meter);
 
+    if (options.live) |live| live.setPhase(.{ .label = "Checking ARP table" });
     harvestArp(shares, hosts.start, hosts.end);
 
     const elapsed = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
     if (options.resolve_hostname or options.resolve_vendor) {
         printDetailedSummary(allocator, io, &stdout_mutex, found.items, &ip_mac_map, options, elapsed);
     } else {
+        if (options.live) |live| live.finish();
         printSummary(io, &stdout_mutex, found.items, elapsed, options.json);
     }
 }
@@ -1056,13 +1083,16 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
 
         candidates.append(shares.allocator, entry.ip) catch continue;
     }
-    if (candidates.items.len == 0) return;
+    // After Ctrl+C the table above still supplied MACs (reading it is
+    // instant), but confirming candidates means another ping wait.
+    if (candidates.items.len == 0 or interrupt.requested()) return;
 
     // One batch for all candidates: only hosts that answer get the
     // "(arp)" report.
     // No meter: this confirmation batch is one ping wait at most, too
-    // brief to deserve a progress phase of its own.
-    const alive = pingSweep(shares.allocator, shares.io, candidates.items, shares.stdout_mutex, null) catch return;
+    // brief to deserve a progress phase of its own. No status line
+    // either: reportHost below counts the hosts that answered.
+    const alive = pingSweep(shares.allocator, shares.io, candidates.items, shares.stdout_mutex, null, null) catch return;
     defer shares.allocator.free(alive);
     var unconfirmed: std.ArrayList([4]u8) = .empty;
     defer unconfirmed.deinit(shares.allocator);
@@ -1093,7 +1123,7 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
         };
         const arp_worker = struct {
             fn run(j: ArpJob) void {
-                while (true) {
+                while (!interrupt.requested()) {
                     const idx = j.next.fetchAdd(1, .monotonic);
                     if (idx >= j.targets.len) break;
                     const ip = j.targets[idx];
