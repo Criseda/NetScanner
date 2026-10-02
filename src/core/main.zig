@@ -39,9 +39,11 @@ pub fn main(init: std.process.Init) !void {
 /// Whether to show the status line (live.zig) instead of streaming
 /// each result: only for text output with both stdout and stderr on a
 /// terminal. Piped or redirected output keeps streaming line by line,
-/// so scripts and `> hosts.txt` see exactly what they always did.
-fn wantsStatusLine(io: std.Io, json: bool) bool {
+/// so scripts and `> hosts.txt` see exactly what they always did, and
+/// so does a terminal with `TERM=dumb`, which cannot redraw a line.
+fn wantsStatusLine(io: std.Io, env: *const std.process.Environ.Map, json: bool) bool {
     if (json) return false;
+    if (live_status.isDumbTerminal(env.get("TERM"))) return false;
     const stdout_tty = std.Io.File.stdout().isTty(io) catch return false;
     const stderr_tty = std.Io.File.stderr().isTty(io) catch return false;
     return stdout_tty and stderr_tty;
@@ -123,7 +125,7 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process
     var live: Live = .init(io, .{ .one = "open port", .many = "open ports" }, .{
         .label = scanLabel(&label_buf, args[2]),
     });
-    const interactive = wantsStatusLine(io, json);
+    const interactive = wantsStatusLine(io, env, json);
     if (interactive) {
         interrupt.install();
         live.glyphs = live_status.glyphs(io, env);
@@ -244,7 +246,7 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.proce
         .label = scanLabel(&label_buf, cidr),
     });
     // The scan starts the line itself, after printing its header.
-    if (wantsStatusLine(io, json)) {
+    if (wantsStatusLine(io, env, json)) {
         interrupt.install();
         live.glyphs = live_status.glyphs(io, env);
         scan_options.live = &live;
