@@ -810,14 +810,18 @@ fn printScanHeader(io: std.Io, stdout_mutex: *std.Io.Mutex, cidr: []const u8, ra
 ///
 /// With a meter, each reaped child counts toward progress. Children are
 /// reaped in input order, so `done` advances in order rather than as
-/// each ping finishes; the percentage is still honest. After Ctrl+C on
-/// an interactive scan, no more pings start and the rest are killed.
+/// each ping finishes; the percentage is still honest. With a status
+/// line, each host that answered is counted on it as it is reaped, so
+/// the found count climbs with the percentage. After Ctrl+C on an
+/// interactive scan no more pings start, and those already running
+/// still finish (see the reap loop).
 fn pingSweep(
     allocator: std.mem.Allocator,
     io: std.Io,
     ips: []const [4]u8,
     stdout_mutex: *std.Io.Mutex,
     meter: ?*ProgressMeter,
+    live: ?*Live,
 ) ![]bool {
     const alive = try allocator.alloc(bool, ips.len);
     errdefer allocator.free(alive);
@@ -857,23 +861,21 @@ fn pingSweep(
         try children.append(allocator, child);
     }
 
+    // Waited for even after Ctrl+C, never killed: killing would discard
+    // the exit status of pings that had already answered, and their
+    // hosts with it. The wait is short. A terminal Ctrl+C reaches the
+    // pings too (they share ns's process group or console), and each
+    // one is capped at about 1s anyway.
     for (children.items, 0..) |*child, i| {
         defer advanceProgress(io, stdout_mutex, meter);
-        // Stopped: reap the rest instead of waiting out their pings.
-        // (A terminal Ctrl+C usually reached them already, as they share
-        // the foreground process group or console.)
-        if (interrupt.requested()) {
-            child.kill(io);
-            continue;
-        }
-        const term = child.wait(io) catch {
-            alive[i] = false;
-            continue;
-        };
+        const term = child.wait(io) catch continue;
         alive[i] = switch (term) {
             .exited => |code| code == 0,
             else => false,
         };
+        if (alive[i]) {
+            if (live) |l| l.addFound();
+        }
     }
     return alive;
 }
@@ -903,7 +905,7 @@ pub fn scanNetworkPing(
 
     var meter: ProgressMeter = .{ .phase = "sweep", .total = targets.items.len, .emit_json = options.json };
     if (options.live) |live| live.setMeter(&meter);
-    const alive = try pingSweep(allocator, io, targets.items, &stdout_mutex, &meter);
+    const alive = try pingSweep(allocator, io, targets.items, &stdout_mutex, &meter, options.live);
     defer allocator.free(alive);
 
     var found: std.ArrayList([4]u8) = .empty;
@@ -911,11 +913,8 @@ pub fn scanNetworkPing(
     for (targets.items, alive) |ip, is_up| {
         if (!is_up) continue;
         found.append(allocator, ip) catch continue;
-        if (options.live) |live| {
-            live.addFound();
-        } else {
-            printHost(io, &stdout_mutex, ip, .ping, options.json);
-        }
+        // With the status line on, pingSweep already counted the host.
+        if (options.live == null) printHost(io, &stdout_mutex, ip, .ping, options.json);
     }
 
     var ip_mac_map = std.AutoHashMap([4]u8, [6]u8).init(allocator);
@@ -1080,8 +1079,9 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     // One batch for all candidates: only hosts that answer get the
     // "(arp)" report.
     // No meter: this confirmation batch is one ping wait at most, too
-    // brief to deserve a progress phase of its own.
-    const alive = pingSweep(shares.allocator, shares.io, candidates.items, shares.stdout_mutex, null) catch return;
+    // brief to deserve a progress phase of its own. No status line
+    // either: reportHost below counts the hosts that answered.
+    const alive = pingSweep(shares.allocator, shares.io, candidates.items, shares.stdout_mutex, null, null) catch return;
     defer shares.allocator.free(alive);
     var unconfirmed: std.ArrayList([4]u8) = .empty;
     defer unconfirmed.deinit(shares.allocator);
