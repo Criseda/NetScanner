@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v1.5.0
+
+Scans report their progress, to frontends and in the terminal:
 
 - `--json` scans now report live progress, so frontends can show a real
   percentage instead of a spinner: `{"type":"progress","phase":"sweep","done":120,"total":254}`.
