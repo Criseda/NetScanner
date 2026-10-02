@@ -165,12 +165,20 @@ pub const Live = struct {
             self.root = .none;
             return;
         };
+        // Repeat the test std.Progress used to pick escape codes over
+        // the legacy Windows console API (it is idempotent): only an
+        // escape-code line can be erased by the second Ctrl+C.
+        const escape_codes = if (std.Io.File.stderr().enableAnsiEscapeCodes(self.io)) |_| true else |_| false;
+        interrupt.eraseStatusLineOnQuit(escape_codes);
     }
 
     /// Stop the ticker and clear the line, so the summary prints on a
     /// clean terminal. Idempotent.
     pub fn finish(self: *Live) void {
         const ticker = self.ticker orelse return;
+        // std.Progress clears the line below. Turned off first, so a
+        // second Ctrl+C can never erase part of the summary instead.
+        interrupt.eraseStatusLineOnQuit(false);
         self.stop.set(self.io);
         ticker.join();
         self.ticker = null;
