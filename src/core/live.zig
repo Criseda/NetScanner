@@ -88,6 +88,16 @@ pub fn localeIsUtf8(lc_all: ?[]const u8, lc_ctype: ?[]const u8, lang: ?[]const u
     return std.ascii.eqlIgnoreCase(codeset, "UTF-8") or std.ascii.eqlIgnoreCase(codeset, "utf8");
 }
 
+/// True when TERM says the terminal cannot move the cursor or erase a
+/// line (`dumb`: Emacs shell mode, some CI ptys). Such a terminal is
+/// still a tty, and std.Progress never checks TERM, so main.zig asks
+/// here and keeps streaming results instead of drawing the status line.
+/// Unset or empty TERM is not dumb: Windows consoles set none.
+pub fn isDumbTerminal(term: ?[]const u8) bool {
+    const name = term orelse return false;
+    return std.mem.eql(u8, name, "dumb");
+}
+
 /// The longest prefix of `line` within `max_bytes` that does not split a
 /// UTF-8 character. std.Progress cuts lines to the terminal width in
 /// bytes, which could leave half a braille or `…` sequence (drawn as

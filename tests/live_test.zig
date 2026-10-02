@@ -77,6 +77,15 @@ test "localeIsUtf8 follows LC_ALL, then LC_CTYPE, then LANG" {
     try std.testing.expect(!live.localeIsUtf8(null, null, "POSIX"));
 }
 
+test "isDumbTerminal is true only for TERM=dumb" {
+    try std.testing.expect(live.isDumbTerminal("dumb"));
+    try std.testing.expect(!live.isDumbTerminal("xterm-256color"));
+    try std.testing.expect(!live.isDumbTerminal("screen"));
+    // Windows consoles set no TERM at all; they draw the line.
+    try std.testing.expect(!live.isDumbTerminal(null));
+    try std.testing.expect(!live.isDumbTerminal(""));
+}
+
 test "truncateUtf8 never splits a character" {
     const line = "⠹ ab…"; // 3 + 1 + 2 + 3 bytes
     try std.testing.expectEqualStrings(line, live.truncateUtf8(line, 100));
