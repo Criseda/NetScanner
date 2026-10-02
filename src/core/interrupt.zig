@@ -6,14 +6,14 @@
 //! results print. A second press quits immediately, as usual.
 //!
 //! Each OS gets its native mechanism:
-//! - POSIX: a SIGINT handler installed with SA_RESETHAND, so the kernel
-//!   restores the default action after the first signal and a second
-//!   Ctrl+C terminates without our involvement. The handler only stores
-//!   an atomic flag, which is async-signal-safe.
+//! - POSIX: a SIGINT handler. The first press only stores an atomic
+//!   flag. The second erases the status line, then re-raises SIGINT
+//!   with the default action, so the process dies exactly as an
+//!   unhandled Ctrl+C would. Both paths are async-signal-safe.
 //! - Windows: SetConsoleCtrlHandler. The handler runs on a thread the
-//!   system creates, not in signal context; returning FALSE on the
-//!   second press passes the event to the default handler, which ends
-//!   the process.
+//!   system creates, not in signal context. On the second press it
+//!   erases the status line and returns FALSE, which passes the event
+//!   to the default handler, and that ends the process.
 //!
 //! Only interactive scans install this. Piped and `--json` scans stream
 //! their results as they go, so the default Ctrl+C loses nothing there.
@@ -24,10 +24,33 @@ const windows = std.os.windows;
 
 var stop_requested: std.atomic.Value(bool) = .init(false);
 
+/// Set while the status line (live.zig) is drawn with escape codes. A
+/// second Ctrl+C ends the process without the clean shutdown that
+/// normally clears the line, so it erases the line itself; otherwise
+/// the last frame stays on screen and the terminal's tab or taskbar
+/// progress keeps spinning.
+var erase_on_quit: std.atomic.Value(bool) = .init(false);
+
+/// What std.Progress writes to take its line down when it ends
+/// cleanly (clearWrittenWithEscapeCodes). It keeps the cursor at the
+/// start of its line, so this erases from there to the end of the
+/// screen, then clears the tab or taskbar progress (OSC 9;4;0). The
+/// leading \r also covers a frame the signal cut short.
+const erase_status_line = "\r\x1b[J\x1b]9;4;0\x1b\\";
+
 /// True once the user has pressed Ctrl+C. Worker pools check this
 /// before taking the next unit of work.
 pub fn requested() bool {
     return stop_requested.load(.monotonic);
+}
+
+/// Whether a second Ctrl+C should erase the status line before the
+/// process dies. live.zig turns this on while it draws with escape
+/// codes, and off before it clears the line itself. Under the legacy
+/// Windows console API there is nothing a raw write could erase, so
+/// it stays off there.
+pub fn eraseStatusLineOnQuit(erase: bool) void {
+    erase_on_quit.store(erase, .monotonic);
 }
 
 /// Take over the first Ctrl+C for the rest of the process.
@@ -45,10 +68,9 @@ pub fn install() void {
         const act: std.posix.Sigaction = .{
             .handler = .{ .handler = handleSigint },
             .mask = std.posix.sigemptyset(),
-            // RESETHAND: one-shot, so the second Ctrl+C gets the default
-            // action. RESTART: resume interrupted syscalls where the OS
-            // allows instead of failing them with EINTR.
-            .flags = std.posix.SA.RESETHAND | std.posix.SA.RESTART,
+            // RESTART: resume interrupted syscalls where the OS allows
+            // instead of failing them with EINTR.
+            .flags = std.posix.SA.RESTART,
         };
         std.posix.sigaction(.INT, &act, null);
     }
@@ -64,22 +86,46 @@ pub fn exitInterrupted() noreturn {
     if (comptime builtin.os.tag == .windows) {
         ExitProcess(@intFromEnum(windows.NTSTATUS.CONTROL_C_EXIT));
     } else {
-        // SA_RESETHAND already restored the default action, but set it
-        // explicitly so this holds however the flag was raised.
-        const default: std.posix.Sigaction = .{
-            .handler = .{ .handler = std.posix.SIG.DFL },
-            .mask = std.posix.sigemptyset(),
-            .flags = 0,
-        };
-        std.posix.sigaction(.INT, &default, null);
+        restoreDefaultSigint();
         std.posix.raise(.INT) catch {};
         // Only reached if the signal is blocked: still report it.
         std.process.exit(128 + @as(u8, @intCast(@intFromEnum(std.posix.SIG.INT))));
     }
 }
 
+fn restoreDefaultSigint() void {
+    const default: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.INT, &default, null);
+}
+
+/// Take the status line down with one raw write. Safe in a signal
+/// handler (write is async-signal-safe) and on the Windows handler
+/// thread, which the scan's own I/O knows nothing about.
+fn eraseStatusLine() void {
+    if (!erase_on_quit.load(.monotonic)) return;
+    const stderr = std.Io.File.stderr().handle;
+    if (comptime builtin.os.tag == .windows) {
+        var written: windows.DWORD = 0;
+        _ = WriteFile(stderr, erase_status_line, erase_status_line.len, &written, null);
+    } else {
+        _ = std.c.write(stderr, erase_status_line, erase_status_line.len);
+    }
+}
+
 fn handleSigint(_: std.posix.SIG) callconv(.c) void {
-    stop_requested.store(true, .monotonic);
+    // First press: ask the scan to stop.
+    if (!stop_requested.swap(true, .monotonic)) return;
+    // Second press: quit now. SIGINT stays blocked while this handler
+    // runs, so the raised signal arrives, with the default action, the
+    // moment it returns. write, sigaction and raise are all
+    // async-signal-safe.
+    eraseStatusLine();
+    restoreDefaultSigint();
+    std.posix.raise(.INT) catch {};
 }
 
 const CTRL_C_EVENT: windows.DWORD = 0;
@@ -88,11 +134,20 @@ const CTRL_BREAK_EVENT: windows.DWORD = 1;
 fn handleConsoleCtrl(ctrl_type: windows.DWORD) callconv(.winapi) windows.BOOL {
     // Close, logoff and shutdown events keep their default handling.
     if (ctrl_type != CTRL_C_EVENT and ctrl_type != CTRL_BREAK_EVENT) return .FALSE;
+    // First press: ask the scan to stop.
+    if (!stop_requested.swap(true, .monotonic)) return .TRUE;
     // Second press: not handled, so the default handler ends the process.
-    if (stop_requested.swap(true, .monotonic)) return .FALSE;
-    return .TRUE;
+    eraseStatusLine();
+    return .FALSE;
 }
 
 const HandlerRoutine = *const fn (windows.DWORD) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn SetConsoleCtrlHandler(handler: ?HandlerRoutine, add: windows.BOOL) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn ExitProcess(exit_code: windows.UINT) callconv(.winapi) noreturn;
+extern "kernel32" fn WriteFile(
+    file: windows.HANDLE,
+    buffer: [*]const u8,
+    bytes_to_write: windows.DWORD,
+    bytes_written: ?*windows.DWORD,
+    overlapped: ?*anyopaque,
+) callconv(.winapi) windows.BOOL;
