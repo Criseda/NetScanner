@@ -234,6 +234,9 @@ pub fn scanPorts(
     const total: usize = @as(usize, end_port) - start_port + 1;
     var meter: ProgressMeter = .{ .phase = "ports", .total = total, .emit_json = options.json and options.progress };
     if (options.live) |live| live.setMeter(&meter);
+    // The caller's status line outlives this frame: detach on every
+    // return path, so its ticker never reads a dead meter.
+    defer if (options.live) |live| live.setMeter(null);
 
     if (start_port == end_port) {
         // One port needs no pool: probe it directly instead of
@@ -622,6 +625,8 @@ fn printDetailedSummary(
     if (options.resolve_hostname and details.len > 0) {
         var meter: ProgressMeter = .{ .phase = "identify", .total = details.len, .emit_json = options.json };
         if (options.live) |live| live.setPhase(.{ .label = "Identifying devices", .meter = &meter, .style = .count });
+        // The meter ends with this block; the status line does not.
+        defer if (options.live) |live| live.setMeter(null);
         const Job = struct {
             allocator: std.mem.Allocator,
             io: std.Io,
@@ -905,6 +910,9 @@ pub fn scanNetworkPing(
 
     var meter: ProgressMeter = .{ .phase = "sweep", .total = targets.items.len, .emit_json = options.json };
     if (options.live) |live| live.setMeter(&meter);
+    // The caller's status line outlives this frame, including on the
+    // error return just below.
+    defer if (options.live) |live| live.setMeter(null);
     const alive = try pingSweep(allocator, io, targets.items, &stdout_mutex, &meter, options.live);
     defer allocator.free(alive);
 
@@ -1013,6 +1021,9 @@ pub fn scanNetwork(
     defer targets.deinit(allocator);
     var meter: ProgressMeter = .{ .phase = "sweep", .total = targets.items.len, .emit_json = options.json };
     if (options.live) |live| live.setMeter(&meter);
+    // The caller's status line outlives this frame. (The ARP phase
+    // below also replaces the meter; this keeps the rule local.)
+    defer if (options.live) |live| live.setMeter(null);
     sweepHosts(allocator, shares, targets.items, &meter);
 
     if (options.live) |live| live.setPhase(.{ .label = "Checking ARP table" });

@@ -141,7 +141,8 @@ pub const Live = struct {
         /// e.g. "Scanning 192.168.1.0/24" or "Identifying devices".
         label: []const u8,
         /// Progress through this phase; null for phases too quick or
-        /// too open-ended to measure (reading the ARP table).
+        /// too open-ended to measure (reading the ARP table). Read by
+        /// the ticker thread: see setMeter for who keeps it alive.
         meter: ?*const ProgressMeter = null,
         /// `percent` shows the found count plus a percentage; `count`
         /// shows "N of M", for small phases counted in hosts.
@@ -194,8 +195,10 @@ pub const Live = struct {
 
     /// Attach the meter of the current phase, keeping its label. For
     /// scans whose caller names the phase but whose engine owns the
-    /// meter (port scans).
-    pub fn setMeter(self: *Live, meter: *const ProgressMeter) void {
+    /// meter (port scans). The ticker reads the meter from its own
+    /// thread, so its owner detaches it (null) before the meter goes
+    /// out of scope, usually with a `defer` right after attaching.
+    pub fn setMeter(self: *Live, meter: ?*const ProgressMeter) void {
         self.phase_mutex.lockUncancelable(self.io);
         defer self.phase_mutex.unlock(self.io);
         self.phase.meter = meter;
@@ -223,15 +226,20 @@ pub const Live = struct {
     }
 
     fn render(self: *Live, frame: usize) void {
-        self.phase_mutex.lockUncancelable(self.io);
-        const phase = self.phase;
-        self.phase_mutex.unlock(self.io);
-
         var buf: [std.Progress.Node.max_name_len]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
-        // A full buffer only shortens the line, so overflow is ignored;
-        // truncateUtf8 below also repairs a character cut by the buffer.
-        writeStatus(&w, self.glyphs, frame, phase, self.found.load(.monotonic), self.noun) catch {};
+        {
+            // Held while formatting, which reads the phase's meter: once
+            // setMeter(null) returns, no frame can still be reading a
+            // meter whose owner is about to return. Workers never take
+            // this lock, so it costs the scan nothing.
+            self.phase_mutex.lockUncancelable(self.io);
+            defer self.phase_mutex.unlock(self.io);
+            // A full buffer only shortens the line, so overflow is
+            // ignored; truncateUtf8 below also repairs a character cut
+            // by the buffer.
+            writeStatus(&w, self.glyphs, frame, self.phase, self.found.load(.monotonic), self.noun) catch {};
+        }
         const width = terminalColumns(self.io) orelse buf.len;
         self.root.setName(truncateUtf8(w.buffered(), width));
     }
