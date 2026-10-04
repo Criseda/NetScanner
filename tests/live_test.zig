@@ -108,6 +108,15 @@ test "isDumbTerminal is true only for TERM=dumb" {
     try std.testing.expect(!live.isDumbTerminal(""));
 }
 
+test "drawable refuses only a terminal that reports a zero size" {
+    try std.testing.expect(live.drawable(.{ .rows = 24, .cols = 80 }));
+    // std.Progress assumes 80x25 when the size cannot be read at all.
+    try std.testing.expect(live.drawable(null));
+    try std.testing.expect(!live.drawable(.{ .rows = 0, .cols = 0 }));
+    try std.testing.expect(!live.drawable(.{ .rows = 0, .cols = 80 }));
+    try std.testing.expect(!live.drawable(.{ .rows = 24, .cols = 0 }));
+}
+
 test "truncateUtf8 never splits a character" {
     const line = "⠹ ab…"; // 3 + 1 + 2 + 3 bytes
     try std.testing.expectEqualStrings(line, live.truncateUtf8(line, 100));

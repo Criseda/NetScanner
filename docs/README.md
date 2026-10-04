@@ -114,8 +114,10 @@ scan for a complete one.
 Piped or redirected output (`ns -s ... > hosts.txt`, `| grep`) and
 `--json` keep streaming every result line by line, with no status line,
 and Ctrl+C stops them immediately as before. The same applies when
-stderr alone is redirected, and in terminals that set `TERM=dumb`
-(Emacs shell mode, for one), which cannot redraw a line.
+stderr alone is redirected, in terminals that set `TERM=dumb` (Emacs
+shell mode, for one), which cannot redraw a line, and in terminals that
+report a size of zero (a pseudo terminal nobody sized, as some CI
+runners use), where the line cannot be drawn.
 
 ### Machine-readable output (`--json`)
 

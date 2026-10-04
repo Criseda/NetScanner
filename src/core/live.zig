@@ -113,15 +113,20 @@ pub fn truncateUtf8(line: []const u8, max_bytes: usize) []const u8 {
     return line[0..end];
 }
 
-/// Terminal width in columns, asked the same way std.Progress does:
-/// TIOCGWINSZ on POSIX, the console screen buffer info on Windows.
-/// Queried on every tick, so resizes are picked up. Null if unknown.
-fn terminalColumns(io: std.Io) ?usize {
+pub const TerminalSize = struct { rows: usize, cols: usize };
+
+/// The terminal's size, asked the same way std.Progress does:
+/// TIOCGWINSZ on POSIX, the console screen buffer info on Windows. Null
+/// when the query fails.
+fn terminalSize(io: std.Io) ?TerminalSize {
     if (comptime builtin.os.tag == .windows) {
         var info = std.os.windows.CONSOLE.USER_IO.GET_SCREEN_BUFFER_INFO;
         const status = info.operate(io, .stderr()) catch return null;
-        if (status != .SUCCESS or info.Data.dwWindowSize.X <= 0) return null;
-        return @intCast(info.Data.dwWindowSize.X);
+        if (status != .SUCCESS) return null;
+        return .{
+            .rows = @intCast(@max(info.Data.dwWindowSize.Y, 0)),
+            .cols = @intCast(@max(info.Data.dwWindowSize.X, 0)),
+        };
     }
     var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
     const result = io.operate(.{ .device_io_control = .{
@@ -129,8 +134,30 @@ fn terminalColumns(io: std.Io) ?usize {
         .code = std.posix.T.IOCGWINSZ,
         .arg = &winsize,
     } }) catch return null;
-    if (result.device_io_control < 0 or winsize.col == 0) return null;
-    return winsize.col;
+    if (result.device_io_control < 0) return null;
+    return .{ .rows = winsize.row, .cols = winsize.col };
+}
+
+/// Terminal width in columns, queried on every tick so resizes are
+/// picked up. Null if unknown.
+fn terminalColumns(io: std.Io) ?usize {
+    const size = terminalSize(io) orelse return null;
+    return if (size.cols == 0) null else size.cols;
+}
+
+/// Whether std.Progress can draw on stderr's terminal (see canDraw).
+pub fn drawable(size: ?TerminalSize) bool {
+    // Unknown is fine: std.Progress assumes 80x25 when it cannot ask.
+    const known = size orelse return true;
+    return known.rows > 0 and known.cols > 0;
+}
+
+/// False when the terminal reports a size of zero, like a pseudo
+/// terminal nobody sized (`script` reading a pipe, some CI runners).
+/// std.Progress gives up there without a word, so a scan would show
+/// nothing at all until its summary; main.zig streams results instead.
+pub fn canDraw(io: std.Io) bool {
+    return drawable(terminalSize(io));
 }
 
 pub const Live = struct {

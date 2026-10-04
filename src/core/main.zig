@@ -41,13 +41,14 @@ pub fn main(init: std.process.Init) !void {
 /// each result: only for text output with both stdout and stderr on a
 /// terminal. Piped or redirected output keeps streaming line by line,
 /// so scripts and `> hosts.txt` see exactly what they always did, and
-/// so does a terminal with `TERM=dumb`, which cannot redraw a line.
+/// so does a terminal that cannot show the line: `TERM=dumb`, which
+/// cannot redraw it, or one that reports a size of zero.
 fn wantsStatusLine(io: std.Io, env: *const std.process.Environ.Map, json: bool) bool {
     if (json) return false;
     if (live_status.isDumbTerminal(env.get("TERM"))) return false;
     const stdout_tty = std.Io.File.stdout().isTty(io) catch return false;
     const stderr_tty = std.Io.File.stderr().isTty(io) catch return false;
-    return stdout_tty and stderr_tty;
+    return stdout_tty and stderr_tty and live_status.canDraw(io);
 }
 
 /// Turn on what a scan in a terminal gets (see wantsStatusLine): the

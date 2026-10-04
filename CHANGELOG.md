@@ -19,8 +19,9 @@
   (ASCII where the terminal is not UTF-8).
   Results print once, in the closing summary, so hosts and ports are no
   longer listed twice. **Behavior change** for terminals only: piped or
-  redirected output, `--json` and `TERM=dumb` terminals still stream
-  line by line, exactly as before.
+  redirected output, `--json`, and terminals that cannot show the line
+  (`TERM=dumb`, or a reported size of zero) still stream line by line,
+  exactly as before.
 - Ctrl+C on a scan in a terminal now stops it and prints what it found
   so far, marked `interrupted` (e.g. `7 hosts up (1.5s, interrupted)`),
   instead of discarding it. A second Ctrl+C quits at once. `ns` still
