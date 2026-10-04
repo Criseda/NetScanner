@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `--json` scans now report live progress, so frontends can show a real
+  percentage instead of a spinner: `{"type":"progress","phase":"sweep","done":120,"total":254}`.
+  Phases are `ports` (`-p`), `sweep` (`-s`, TCP or `--ping`) and
+  `identify` (hostname resolution with `--resolve` / `--hostname`, which
+  can take seconds after the sweep is done). Events go out only when
+  the whole percentage changes, at most about 100 per phase. `done`
+  only increases, and each phase ends with one `done == total` event.
+  Existing events are unchanged and text output is unaffected.
+
 ## v1.4.0
 
 Port scans name the services they find:

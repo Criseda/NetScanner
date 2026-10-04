@@ -159,3 +159,100 @@ fn assertSorted(comptime T: type, items: []const T) !void {
         try std.testing.expect(a <= b);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Progress events. The printing itself goes to stdout, which tests must
+// never touch, so these cover the throttling and ordering logic that
+// decides what gets printed.
+// ---------------------------------------------------------------------------
+
+/// How many units of a `total`-sized phase would emit an event.
+fn countCrossings(total: usize) usize {
+    var n: usize = 0;
+    for (1..total + 1) |done| {
+        if (scanner.crossesPercent(done, total)) n += 1;
+    }
+    return n;
+}
+
+test "crossesPercent emits at most 100 events per phase" {
+    // Below 100 units every one moves the percentage; from 100 up,
+    // exactly one per whole percent, however large the range.
+    try std.testing.expectEqual(@as(usize, 1), countCrossings(1));
+    try std.testing.expectEqual(@as(usize, 9), countCrossings(9));
+    try std.testing.expectEqual(@as(usize, 100), countCrossings(100));
+    try std.testing.expectEqual(@as(usize, 100), countCrossings(254));
+    try std.testing.expectEqual(@as(usize, 100), countCrossings(65535));
+}
+
+test "crossesPercent always emits the final unit" {
+    for ([_]usize{ 1, 2, 3, 99, 101, 254, 1023, 65535 }) |total| {
+        try std.testing.expect(scanner.crossesPercent(total, total));
+    }
+}
+
+test "crossesPercent rejects out-of-range counts" {
+    try std.testing.expect(!scanner.crossesPercent(0, 10));
+    try std.testing.expect(!scanner.crossesPercent(11, 10));
+    try std.testing.expect(!scanner.crossesPercent(0, 0));
+}
+
+test "ProgressMeter claims each count once, in order, ending at total" {
+    var meter: scanner.ProgressMeter = .{ .phase = "ports", .total = 254 };
+    var claimed: usize = 0;
+    var last: usize = 0;
+    for (0..254) |_| {
+        if (!meter.advance()) continue;
+        const done = meter.claim() orelse continue;
+        try std.testing.expect(done > last);
+        last = done;
+        claimed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 254), last);
+    try std.testing.expectEqual(@as(usize, 100), claimed);
+    // Nothing newer to report: a late claim prints nothing.
+    try std.testing.expectEqual(@as(?usize, null), meter.claim());
+}
+
+test "ProgressMeter stays ordered when workers race" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const total = 5000;
+
+    // Mirrors advanceProgress: advance lock-free, claim under a lock,
+    // but records the claimed counts instead of printing them.
+    const Shared = struct {
+        meter: scanner.ProgressMeter = .{ .phase = "sweep", .total = total },
+        mutex: std.Io.Mutex = .init,
+        claims: [total]usize = undefined,
+        claim_count: usize = 0,
+
+        fn work(self: *@This(), units: usize) void {
+            for (0..units) |_| {
+                if (!self.meter.advance()) continue;
+                self.mutex.lockUncancelable(std.testing.io);
+                defer self.mutex.unlock(std.testing.io);
+                const done = self.meter.claim() orelse continue;
+                self.claims[self.claim_count] = done;
+                self.claim_count += 1;
+            }
+        }
+    };
+    var shared: Shared = .{};
+
+    const workers = 8;
+    var threads: [workers]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Shared.work, .{ &shared, total / workers });
+    for (threads) |t| t.join();
+
+    const claims = shared.claims[0..shared.claim_count];
+    try std.testing.expect(claims.len > 0 and claims.len <= 100);
+    try assertStrictlyIncreasing(claims);
+    try std.testing.expectEqual(@as(usize, total), claims[claims.len - 1]);
+}
+
+fn assertStrictlyIncreasing(items: []const usize) !void {
+    if (items.len < 2) return;
+    for (items[0 .. items.len - 1], items[1..]) |a, b| {
+        try std.testing.expect(a < b);
+    }
+}
