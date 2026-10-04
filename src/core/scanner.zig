@@ -1174,74 +1174,82 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     // it is instant), but confirming candidates means another ping wait.
     if (candidates.items.len == 0 or run.stopRequested()) return;
 
-    // One batch for all candidates: only hosts that answer get the
-    // "(arp)" report.
-    const Ignore = struct {
-        pub fn pinged(_: @This(), _: usize, _: bool) void {}
+    // One unit per candidate, done once its fate is known: it answered
+    // the ping (and is reported "(arp)" right then), or it did not.
+    // Windows gives an unanswered candidate a second check (SendARP,
+    // below) and counts it once that ends.
+    run.startPhase(.arp, candidates.items.len);
+    const Confirm = struct {
+        discovery: Discovery,
+        candidates: []const [4]u8,
+
+        pub fn pinged(self: @This(), index: usize, answered: bool) void {
+            if (answered) self.discovery.reportHost(self.candidates[index], .arp);
+            if (answered or builtin.os.tag != .windows) self.discovery.run.advance();
+        }
     };
-    const alive = pingSweep(run, candidates.items, Ignore{}) catch return;
+    const alive = pingSweep(run, candidates.items, Confirm{ .discovery = shares, .candidates = candidates.items }) catch |err| {
+        std.debug.print("arp check skipped: {}\n", .{err});
+        return;
+    };
     defer run.allocator.free(alive);
+    if (comptime builtin.os.tag != .windows) return;
+
     var unconfirmed: std.ArrayList([4]u8) = .empty;
     defer unconfirmed.deinit(run.allocator);
-
     for (candidates.items, alive) |ip, is_up| {
-        if (is_up) {
-            shares.reportHost(ip, .arp);
-        } else {
-            unconfirmed.append(run.allocator, ip) catch continue;
-        }
+        if (!is_up) unconfirmed.append(run.allocator, ip) catch continue;
     }
-
     if (unconfirmed.items.len == 0) return;
 
     // For unconfirmed candidates that dropped ICMP ping (e.g. firewalled IoT,
     // GL.iNet, TP-Link smart plugs), verify live Layer 2 presence via SendARP on Windows.
-    if (comptime builtin.os.tag == .windows) {
-        const ArpJob = struct {
-            shares: Discovery,
-            targets: [][4]u8,
-            next: *std.atomic.Value(usize),
-        };
-        var next_idx: std.atomic.Value(usize) = .init(0);
-        const job = ArpJob{
-            .shares = shares,
-            .targets = unconfirmed.items,
-            .next = &next_idx,
-        };
-        const arp_worker = struct {
-            fn work(j: ArpJob) void {
-                while (!j.shares.run.stopRequested()) {
-                    const idx = j.next.fetchAdd(1, .monotonic);
-                    if (idx >= j.targets.len) break;
-                    const ip = j.targets[idx];
-                    var ip_buf: [16]u8 = undefined;
-                    const ip_str = std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch continue;
-                    if (c_bindings.getMacSendArp(ip_str.ptr)) |mac| {
-                        j.shares.recordMac(ip, mac);
-                        j.shares.reportHost(ip, .arp);
-                    }
+    const ArpJob = struct {
+        shares: Discovery,
+        targets: [][4]u8,
+        next: *std.atomic.Value(usize),
+    };
+    var next_idx: std.atomic.Value(usize) = .init(0);
+    const job = ArpJob{
+        .shares = shares,
+        .targets = unconfirmed.items,
+        .next = &next_idx,
+    };
+    const arp_worker = struct {
+        fn work(j: ArpJob) void {
+            while (!j.shares.run.stopRequested()) {
+                const idx = j.next.fetchAdd(1, .monotonic);
+                if (idx >= j.targets.len) break;
+                const ip = j.targets[idx];
+                // Dotted IPv4 is at most 15 characters plus the terminator.
+                var ip_buf: [16]u8 = undefined;
+                const ip_str = std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch unreachable;
+                if (c_bindings.getMacSendArp(ip_str.ptr)) |mac| {
+                    j.shares.recordMac(ip, mac);
+                    j.shares.reportHost(ip, .arp);
                 }
+                j.shares.run.advance();
             }
-        }.work;
+        }
+    }.work;
 
-        const worker_count = @min(unconfirmed.items.len, 8);
-        var threads: std.ArrayList(Thread) = .empty;
-        defer {
-            for (threads.items) |t| t.join();
-            threads.deinit(run.allocator);
-        }
-        for (0..worker_count) |_| {
-            if (Thread.spawn(.{}, arp_worker, .{job})) |t| {
-                threads.append(run.allocator, t) catch {
-                    t.join();
-                    break;
-                };
-            } else |_| break;
-        }
-        if (threads.items.len == 0) {
-            // Fallback: execute synchronously if thread spawning fails or system is single-threaded
-            arp_worker(job);
-        }
+    const worker_count = @min(unconfirmed.items.len, 8);
+    var threads: std.ArrayList(Thread) = .empty;
+    defer {
+        for (threads.items) |t| t.join();
+        threads.deinit(run.allocator);
+    }
+    for (0..worker_count) |_| {
+        if (Thread.spawn(.{}, arp_worker, .{job})) |t| {
+            threads.append(run.allocator, t) catch {
+                t.join();
+                break;
+            };
+        } else |_| break;
+    }
+    if (threads.items.len == 0) {
+        // Fallback: execute synchronously if thread spawning fails or system is single-threaded
+        arp_worker(job);
     }
 }
 

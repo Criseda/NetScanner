@@ -161,12 +161,16 @@ always last:
   |---|---|---|
   | `-p` | `ports` | ports probed / ports in range |
   | `-s` (TCP or `--ping`) | `sweep` | IPs probed / usable hosts |
+  | `-s` (TCP) | `arp` | ARP-table entries checked / entries the sweep missed |
   | `-s --resolve` / `--hostname` | `identify` | hosts resolved / hosts found |
 
-  An event goes out only when the whole percentage changes, so a phase
-  emits at most about 100 lines whatever its size. Within a phase `done`
-  only increases, and each phase ends with exactly one `done == total`
-  event. A phase may skip counts, so show the latest event rather than
+  `arp` covers the check of quiet hosts that ignored the TCP probe but
+  sit in the ARP table: each gets one ping (about 1s at most) before it
+  counts as up. An event goes out only when the whole percentage
+  changes, so a phase emits at most about 100 lines whatever its size.
+  Within a phase `done` only increases, and each phase ends with exactly
+  one `done == total` event. A phase with nothing to do (no ARP entries
+  to check, no hosts to name) sends no events. A phase may skip counts, so show the latest event rather than
   counting them. A `host` or `port` event always comes before the
   progress event that counts it. Phases arrive in table order, and
   `summary` still comes last. Text output has no progress lines.
