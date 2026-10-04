@@ -2,6 +2,7 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
 const ports = @import("ports.zig");
+const progress = @import("progress.zig");
 const interrupt = @import("interrupt.zig");
 const live_status = @import("live.zig");
 const Live = live_status.Live;
@@ -47,6 +48,16 @@ fn wantsStatusLine(io: std.Io, env: *const std.process.Environ.Map, json: bool) 
     const stdout_tty = std.Io.File.stdout().isTty(io) catch return false;
     const stderr_tty = std.Io.File.stderr().isTty(io) catch return false;
     return stdout_tty and stderr_tty;
+}
+
+/// Turn on what a scan in a terminal gets (see wantsStatusLine): the
+/// status line, drawn by `live`, and graceful Ctrl+C. True when it is
+/// on; the scan then takes `live.display()` and stops streaming.
+fn setUpInteractive(io: std.Io, env: *const std.process.Environ.Map, json: bool, live: *Live) bool {
+    if (!wantsStatusLine(io, env, json)) return false;
+    interrupt.install();
+    live.glyphs = live_status.glyphs(io, env);
+    return true;
 }
 
 /// "Scanning <target>" for the status line, in caller storage that
@@ -121,17 +132,12 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process
 
     const ip_address = [4]u8{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] };
 
+    // The tracker and the line drawing it outlive the scan; the scan
+    // starts and ends the line itself.
+    var tracker: progress.Tracker = .{};
     var label_buf: [64]u8 = undefined;
-    var live: Live = .init(io, .{ .one = "open port", .many = "open ports" }, .{
-        .label = scanLabel(&label_buf, args[2]),
-    });
-    const interactive = wantsStatusLine(io, env, json);
-    if (interactive) {
-        interrupt.install();
-        live.glyphs = live_status.glyphs(io, env);
-        live.begin();
-    }
-    defer live.finish();
+    var live: Live = .init(io, &tracker, scanLabel(&label_buf, args[2]), .{ .one = "open port", .many = "open ports" });
+    const interactive = setUpInteractive(io, env, json, &live);
 
     const started = std.Io.Clock.now(.awake, io);
     var open_ports = try scanner.scanPorts(
@@ -144,12 +150,13 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process
             .timeout_ms = timeout_ms,
             .json = json,
             .stream_results = !interactive,
-            .live = if (interactive) &live else null,
+            .tracker = &tracker,
+            .display = if (interactive) live.display() else null,
+            .cancel = interrupt.flag(),
         },
     );
     defer open_ports.deinit(allocator);
     const elapsed_ns = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
-    live.finish();
 
     var stdout_mutex: std.Io.Mutex = .init;
     if (json) {
@@ -199,7 +206,7 @@ fn printPortTable(io: std.Io, stdout_mutex: *std.Io.Mutex, open_ports: []const u
         }) catch return;
         out.flush() catch return;
     }
-    out.print("{d} {s} ({d:.1}s{s})\n", .{ open_ports.len, noun, seconds, scanner.interruptedNote() }) catch {};
+    out.print("{d} {s} ({d:.1}s{s})\n", .{ open_ports.len, noun, seconds, scanner.interruptedNote(interrupt.requested()) }) catch {};
     out.flush() catch {};
 }
 
@@ -241,17 +248,16 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.proce
         }
     }
 
+    // The tracker and the line drawing it outlive the scan; the scan
+    // starts the line after its header and ends it before the results.
+    var tracker: progress.Tracker = .{};
     var label_buf: [64]u8 = undefined;
-    var live: Live = .init(io, .{ .one = "host found", .many = "hosts found" }, .{
-        .label = scanLabel(&label_buf, cidr),
-    });
-    // The scan starts the line itself, after printing its header.
-    if (wantsStatusLine(io, env, json)) {
-        interrupt.install();
-        live.glyphs = live_status.glyphs(io, env);
-        scan_options.live = &live;
-    }
-    defer live.finish();
+    var live: Live = .init(io, &tracker, scanLabel(&label_buf, cidr), .{ .one = "host found", .many = "hosts found" });
+    const interactive = setUpInteractive(io, env, json, &live);
+    scan_options.stream_results = !interactive;
+    scan_options.tracker = &tracker;
+    scan_options.display = if (interactive) live.display() else null;
+    scan_options.cancel = interrupt.flag();
 
     // A bad subnet used to escape as a raw Zig error trace; report it
     // like every other input error instead.

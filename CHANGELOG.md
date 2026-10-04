@@ -9,7 +9,9 @@
   can take seconds after the sweep is done). Events go out only when
   the whole percentage changes, at most about 100 per phase. `done`
   only increases, and each phase ends with one `done == total` event.
-  Existing events are unchanged and text output is unaffected.
+  A `host` or `port` event always comes before the progress event that
+  counts it. Existing events are unchanged, and text output has no
+  progress lines.
 - In a terminal, text scans show a live status line instead of printing
   every result as it is found, e.g. `⠹ Scanning 192.168.1.0/24… 42% ·
   7 hosts found`, then `Identifying devices… 3 of 9` during `--resolve`
@@ -24,6 +26,10 @@
   exits as interrupted (SIGINT; `STATUS_CONTROL_C_EXIT` on Windows), so
   scripts see the stop. If SIGINT was ignored at startup (`nohup`), it
   stays ignored.
+- The elapsed time that closes a subnet scan (and `elapsed_ms` in its
+  `--json` summary) now includes hostname resolution with `--resolve` /
+  `--hostname`. It used to stop when the sweep ended, so a scan that
+  spent seconds naming hosts reported only part of its time.
 
 ## v1.4.0
 

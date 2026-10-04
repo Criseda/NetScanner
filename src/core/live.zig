@@ -23,14 +23,16 @@
 //! (`| Scanning 192.168.1.0/24... 42% - 7 hosts found`) otherwise.
 //!
 //! This file only decides what the line says. A ticker thread rebuilds
-//! the text a few times a second from counters the scan bumps (found
-//! results, the phase's ProgressMeter), so workers never format or lock
-//! anything for it.
+//! the text a few times a second from the scan's progress.Tracker, which
+//! the caller owns, so workers never format or lock anything for it and
+//! nothing the ticker reads can go out of scope under it. The scan
+//! engine knows the line only as a progress.Display: two hooks, to
+//! appear after its header and to get out of the way before results.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const interrupt = @import("interrupt.zig");
-const ProgressMeter = @import("progress.zig").ProgressMeter;
+const progress = @import("progress.zig");
 
 /// How often the text (and the spinner frame) is rebuilt; matches
 /// std.Progress's default 80ms redraw, so every frame gets drawn.
@@ -133,13 +135,14 @@ fn terminalColumns(io: std.Io) ?usize {
 
 pub const Live = struct {
     io: std.Io,
-    root: std.Progress.Node = .none,
+    /// What the line shows. The caller owns it and keeps it alive at
+    /// least as long as this Live, so the ticker can always read it.
+    tracker: *progress.Tracker,
+    /// What the probing phase is called, e.g. "Scanning 192.168.1.0/24".
+    label: []const u8,
     /// What the results are called, e.g. "host found" / "hosts found".
     noun: Noun,
-    found: std.atomic.Value(usize) = .init(0),
-    /// Guards `phase`: the scan switches phases while the ticker reads.
-    phase_mutex: std.Io.Mutex = .init,
-    phase: Phase,
+    root: std.Progress.Node = .none,
     ticker: ?std.Thread = null,
     stop: std.Io.Event = .unset,
     /// Set from glyphs() by whoever turns the line on.
@@ -150,25 +153,29 @@ pub const Live = struct {
 
     pub const Noun = struct { one: []const u8, many: []const u8 };
 
-    pub const Phase = struct {
-        /// e.g. "Scanning 192.168.1.0/24" or "Identifying devices".
-        label: []const u8,
-        /// Progress through this phase; null for phases too quick or
-        /// too open-ended to measure (reading the ARP table). Read by
-        /// the ticker thread: see setMeter for who keeps it alive.
-        meter: ?*const ProgressMeter = null,
-        /// `percent` shows the found count plus a percentage; `count`
-        /// shows "N of M", for small phases counted in hosts.
-        style: enum { percent, count } = .percent,
-    };
+    pub fn init(io: std.Io, tracker: *progress.Tracker, label: []const u8, noun: Noun) Live {
+        return .{ .io = io, .tracker = tracker, .label = label, .noun = noun };
+    }
 
-    pub fn init(io: std.Io, noun: Noun, phase: Phase) Live {
-        return .{ .io = io, .noun = noun, .phase = phase };
+    /// The hooks the scan engine calls: begin() once its header is out,
+    /// end() before its results print (see progress.Display).
+    pub fn display(self: *Live) progress.Display {
+        return .{ .context = self, .beginFn = beginOpaque, .endFn = endOpaque };
+    }
+
+    fn beginOpaque(context: *anyopaque) void {
+        const self: *Live = @ptrCast(@alignCast(context));
+        self.begin();
+    }
+
+    fn endOpaque(context: *anyopaque) void {
+        const self: *Live = @ptrCast(@alignCast(context));
+        self.end();
     }
 
     /// Start drawing. Call once nothing else will write to stdout until
-    /// finish(): stdout and the status line share the terminal, and
-    /// only stderr writes are coordinated with it. If std.Progress has
+    /// end(): stdout and the status line share the terminal, and only
+    /// stderr writes are coordinated with it. If std.Progress has
     /// nowhere to draw (no threads, say) this does nothing; the summary
     /// still prints, so no result is lost. Call at most once per process.
     pub fn begin(self: *Live) void {
@@ -186,9 +193,9 @@ pub const Live = struct {
         interrupt.eraseStatusLineOnQuit(self.escape_codes);
     }
 
-    /// Stop the ticker and clear the line, so the summary prints on a
-    /// clean terminal. Idempotent.
-    pub fn finish(self: *Live) void {
+    /// Stop the ticker and clear the line, so the results print on a
+    /// clean terminal. Idempotent, and a no-op if begin() never drew.
+    pub fn end(self: *Live) void {
         const ticker = self.ticker orelse return;
         // std.Progress clears the line below. Turned off first, so a
         // second Ctrl+C can never erase part of the summary instead.
@@ -206,28 +213,6 @@ pub const Live = struct {
         if (self.escape_codes) std.Io.File.stderr().writeStreamingAll(self.io, "\r\x1b[K") catch {};
     }
 
-    pub fn setPhase(self: *Live, phase: Phase) void {
-        self.phase_mutex.lockUncancelable(self.io);
-        defer self.phase_mutex.unlock(self.io);
-        self.phase = phase;
-    }
-
-    /// Attach the meter of the current phase, keeping its label. For
-    /// scans whose caller names the phase but whose engine owns the
-    /// meter (port scans). The ticker reads the meter from its own
-    /// thread, so its owner detaches it (null) before the meter goes
-    /// out of scope, usually with a `defer` right after attaching.
-    pub fn setMeter(self: *Live, meter: ?*const ProgressMeter) void {
-        self.phase_mutex.lockUncancelable(self.io);
-        defer self.phase_mutex.unlock(self.io);
-        self.phase.meter = meter;
-    }
-
-    /// Count one result (a host up, an open port).
-    pub fn addFound(self: *Live) void {
-        _ = self.found.fetchAdd(1, .monotonic);
-    }
-
     fn tick(self: *Live) void {
         var frame: usize = 0;
         while (true) : (frame +%= 1) {
@@ -236,7 +221,7 @@ pub const Live = struct {
                 .clock = .awake,
                 .raw = .fromMilliseconds(TICK_MS),
             } };
-            // Returns at once when finish() sets the event.
+            // Returns at once when end() sets the event.
             if (self.stop.waitTimeout(self.io, timeout)) |_| return else |err| switch (err) {
                 error.Timeout => {},
                 error.Canceled => return,
@@ -245,48 +230,51 @@ pub const Live = struct {
     }
 
     fn render(self: *Live, frame: usize) void {
+        const status: Status = .{
+            .label = self.label,
+            .noun = self.noun,
+            .progress = self.tracker.snapshot(self.io),
+            .stopping = interrupt.requested(),
+        };
         var buf: [std.Progress.Node.max_name_len]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
-        {
-            // Held while formatting, which reads the phase's meter: once
-            // setMeter(null) returns, no frame can still be reading a
-            // meter whose owner is about to return. Workers never take
-            // this lock, so it costs the scan nothing.
-            self.phase_mutex.lockUncancelable(self.io);
-            defer self.phase_mutex.unlock(self.io);
-            // A full buffer only shortens the line, so overflow is
-            // ignored; truncateUtf8 below also repairs a character cut
-            // by the buffer.
-            writeStatus(&w, self.glyphs, frame, self.phase, self.found.load(.monotonic), self.noun) catch {};
-        }
+        // A full buffer only shortens the line, so overflow is ignored;
+        // truncateUtf8 below also repairs a character cut by the buffer.
+        writeStatus(&w, self.glyphs, frame, status) catch {};
         const width = terminalColumns(self.io) orelse buf.len;
         self.root.setName(truncateUtf8(w.buffered(), width));
     }
 };
 
+/// What one frame of the status line is made of.
+pub const Status = struct {
+    /// What the probing phase is called, e.g. "Scanning 192.168.1.0/24".
+    label: []const u8,
+    noun: Live.Noun,
+    progress: progress.Snapshot = .{},
+    /// Ctrl+C was pressed: probes in flight are finishing.
+    stopping: bool = false,
+};
+
 /// Compose one status line. Separate from the ticker so the wording is
 /// testable without a terminal.
-pub fn writeStatus(
-    w: *std.Io.Writer,
-    g: Glyphs,
-    frame: usize,
-    phase: Live.Phase,
-    found: usize,
-    noun: Live.Noun,
-) std.Io.Writer.Error!void {
+pub fn writeStatus(w: *std.Io.Writer, g: Glyphs, frame: usize, s: Status) std.Io.Writer.Error!void {
     const spinner = g.spinner[frame % g.spinner.len];
-    if (interrupt.requested()) {
+    if (s.stopping) {
         try w.print("{s} Stopping{s} finishing probes in flight (Ctrl+C again to quit now)", .{ spinner, g.ellipsis });
         return;
     }
-    try w.print("{s} {s}{s}", .{ spinner, phase.label, g.ellipsis });
-    switch (phase.style) {
-        .percent => {
-            if (phase.meter) |m| try w.print(" {d}% {s}", .{ m.percent(), g.separator });
-            try w.print(" {d} {s}", .{ found, if (found == 1) noun.one else noun.many });
-        },
-        .count => if (phase.meter) |m| {
-            try w.print(" {d} of {d}", .{ m.completed(), m.total });
+    const p = s.progress;
+    // Before the first phase starts, the line reads as the probing
+    // phase at its very beginning.
+    switch (p.phase orelse .sweep) {
+        // A handful of hosts, each taking a moment: count them.
+        .identify => try w.print("{s} Identifying devices{s} {d} of {d}", .{ spinner, g.ellipsis, p.done, p.total }),
+        .ports, .sweep, .arp => |phase| {
+            const label = if (phase == .arp) "Checking ARP table" else s.label;
+            try w.print("{s} {s}{s}", .{ spinner, label, g.ellipsis });
+            if (p.percent()) |percent| try w.print(" {d}% {s}", .{ percent, g.separator });
+            try w.print(" {d} {s}", .{ p.found, if (p.found == 1) s.noun.one else s.noun.many });
         },
     }
 }

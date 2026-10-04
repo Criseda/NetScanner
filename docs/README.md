@@ -167,8 +167,9 @@ always last:
   emits at most about 100 lines whatever its size. Within a phase `done`
   only increases, and each phase ends with exactly one `done == total`
   event. A phase may skip counts, so show the latest event rather than
-  counting them. Phases arrive in table order, and `summary` still comes
-  last. Text output has no progress lines.
+  counting them. A `host` or `port` event always comes before the
+  progress event that counts it. Phases arrive in table order, and
+  `summary` still comes last. Text output has no progress lines.
 - Input errors print `{"type":"error","message":"..."}` and exit with
   status 1. Diagnostics (warnings) stay on stderr as plain text.
 

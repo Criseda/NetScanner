@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const scanner = @import("core").scanner;
+const progress = @import("core").progress;
 
 // This is a simple test to ensure the scanner module can be imported
 test "scanner module imports correctly" {
@@ -161,98 +162,91 @@ fn assertSorted(comptime T: type, items: []const T) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Progress events. The printing itself goes to stdout, which tests must
-// never touch, so these cover the throttling and ordering logic that
-// decides what gets printed.
+// What the caller hands a scan: a tracker it counts on, a display it
+// starts and ends, and a flag that stops it early.
 // ---------------------------------------------------------------------------
 
-/// How many units of a `total`-sized phase would emit an event.
-fn countCrossings(total: usize) usize {
-    var n: usize = 0;
-    for (1..total + 1) |done| {
-        if (scanner.crossesPercent(done, total)) n += 1;
-    }
-    return n;
-}
-
-test "crossesPercent emits at most 100 events per phase" {
-    // Below 100 units every one moves the percentage; from 100 up,
-    // exactly one per whole percent, however large the range.
-    try std.testing.expectEqual(@as(usize, 1), countCrossings(1));
-    try std.testing.expectEqual(@as(usize, 9), countCrossings(9));
-    try std.testing.expectEqual(@as(usize, 100), countCrossings(100));
-    try std.testing.expectEqual(@as(usize, 100), countCrossings(254));
-    try std.testing.expectEqual(@as(usize, 100), countCrossings(65535));
-}
-
-test "crossesPercent always emits the final unit" {
-    for ([_]usize{ 1, 2, 3, 99, 101, 254, 1023, 65535 }) |total| {
-        try std.testing.expect(scanner.crossesPercent(total, total));
-    }
-}
-
-test "crossesPercent rejects out-of-range counts" {
-    try std.testing.expect(!scanner.crossesPercent(0, 10));
-    try std.testing.expect(!scanner.crossesPercent(11, 10));
-    try std.testing.expect(!scanner.crossesPercent(0, 0));
-}
-
-test "ProgressMeter claims each count once, in order, ending at total" {
-    var meter: scanner.ProgressMeter = .{ .phase = "ports", .total = 254 };
-    var claimed: usize = 0;
-    var last: usize = 0;
-    for (0..254) |_| {
-        if (!meter.advance()) continue;
-        const done = meter.claim() orelse continue;
-        try std.testing.expect(done > last);
-        last = done;
-        claimed += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 254), last);
-    try std.testing.expectEqual(@as(usize, 100), claimed);
-    // Nothing newer to report: a late claim prints nothing.
-    try std.testing.expectEqual(@as(?usize, null), meter.claim());
-}
-
-test "ProgressMeter stays ordered when workers race" {
+test "scanPorts counts every port, and each open one, on the caller's tracker" {
     if (builtin.single_threaded) return error.SkipZigTest;
-    const total = 5000;
+    const io = std.testing.io;
 
-    // Mirrors advanceProgress: advance lock-free, claim under a lock,
-    // but records the claimed counts instead of printing them.
-    const Shared = struct {
-        meter: scanner.ProgressMeter = .{ .phase = "sweep", .total = total },
-        mutex: std.Io.Mutex = .init,
-        claims: [total]usize = undefined,
-        claim_count: usize = 0,
+    var bound = bindLoopbackAbove(io, 48531, 20) orelse return error.SkipZigTest;
+    defer bound.server.deinit(io);
+    if (bound.port > 65535 - 9) return error.SkipZigTest;
 
-        fn work(self: *@This(), units: usize) void {
-            for (0..units) |_| {
-                if (!self.meter.advance()) continue;
-                self.mutex.lockUncancelable(std.testing.io);
-                defer self.mutex.unlock(std.testing.io);
-                const done = self.meter.claim() orelse continue;
-                self.claims[self.claim_count] = done;
-                self.claim_count += 1;
-            }
+    var tracker: progress.Tracker = .{};
+    var open = try scanner.scanPorts(
+        std.testing.allocator,
+        io,
+        .{ 127, 0, 0, 1 },
+        bound.port,
+        bound.port + 9,
+        .{ .stream_results = false, .tracker = &tracker },
+    );
+    defer open.deinit(std.testing.allocator);
+
+    const snapshot = tracker.snapshot(io);
+    try std.testing.expectEqual(@as(?progress.Phase, .ports), snapshot.phase);
+    try std.testing.expectEqual(@as(usize, 10), snapshot.total);
+    try std.testing.expectEqual(@as(usize, 10), snapshot.done);
+    // Other listeners may sit in the range: found matches what came back.
+    try std.testing.expectEqual(open.items.len, snapshot.found);
+    try std.testing.expect(std.mem.indexOfScalar(u16, open.items, bound.port) != null);
+}
+
+test "scanPorts probes nothing once cancelled" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const io = std.testing.io;
+
+    // Every worker checks the flag before taking a port, so a scan
+    // stopped before it starts returns at once, whatever the range.
+    var cancel: std.atomic.Value(bool) = .init(true);
+    var tracker: progress.Tracker = .{};
+    var open = try scanner.scanPorts(
+        std.testing.allocator,
+        io,
+        .{ 127, 0, 0, 1 },
+        1,
+        65535,
+        .{ .stream_results = false, .tracker = &tracker, .cancel = &cancel },
+    );
+    defer open.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), tracker.snapshot(io).done);
+    try std.testing.expectEqual(@as(usize, 0), open.items.len);
+}
+
+test "scanPorts shows its display only while it runs" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    // Stands in for the status line: counts the engine's calls.
+    const Recorder = struct {
+        begun: usize = 0,
+        ended: usize = 0,
+
+        fn begin(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.begun += 1;
+        }
+        fn end(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.ended += 1;
         }
     };
-    var shared: Shared = .{};
-
-    const workers = 8;
-    var threads: [workers]std.Thread = undefined;
-    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Shared.work, .{ &shared, total / workers });
-    for (threads) |t| t.join();
-
-    const claims = shared.claims[0..shared.claim_count];
-    try std.testing.expect(claims.len > 0 and claims.len <= 100);
-    try assertStrictlyIncreasing(claims);
-    try std.testing.expectEqual(@as(usize, total), claims[claims.len - 1]);
-}
-
-fn assertStrictlyIncreasing(items: []const usize) !void {
-    if (items.len < 2) return;
-    for (items[0 .. items.len - 1], items[1..]) |a, b| {
-        try std.testing.expect(a < b);
-    }
+    var recorder: Recorder = .{};
+    var open = try scanner.scanPorts(
+        std.testing.allocator,
+        std.testing.io,
+        .{ 127, 0, 0, 1 },
+        9,
+        9,
+        .{
+            .stream_results = false,
+            .display = .{ .context = &recorder, .beginFn = Recorder.begin, .endFn = Recorder.end },
+        },
+    );
+    defer open.deinit(std.testing.allocator);
+    // Up once, and down again before scanPorts returns, so the caller
+    // can print its table on a clean terminal.
+    try std.testing.expectEqual(@as(usize, 1), recorder.begun);
+    try std.testing.expect(recorder.ended >= 1);
 }

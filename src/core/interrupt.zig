@@ -38,10 +38,17 @@ var erase_on_quit: std.atomic.Value(bool) = .init(false);
 /// leading \r also covers a frame the signal cut short.
 const erase_status_line = "\r\x1b[J\x1b]9;4;0\x1b\\";
 
-/// True once the user has pressed Ctrl+C. Worker pools check this
-/// before taking the next unit of work.
+/// True once the user has pressed Ctrl+C.
 pub fn requested() bool {
     return stop_requested.load(.monotonic);
+}
+
+/// The flag itself, for the scan engine's `cancel` option: its worker
+/// pools check it before taking the next unit of work. The engine takes
+/// a pointer rather than reading this module, so it has no global state
+/// and tests can stop a scan with a flag of their own.
+pub fn flag() *const std.atomic.Value(bool) {
+    return &stop_requested;
 }
 
 /// Whether a second Ctrl+C should erase the status line before the
