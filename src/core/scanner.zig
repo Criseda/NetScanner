@@ -864,8 +864,7 @@ fn printScanHeader(run: Run, cidr: []const u8, range: utils.IpRange) void {
 /// ping sweep serial (~2s/host). posix-spawned children have no such
 /// lock, so a whole subnet resolves in about one wait each.
 ///
-/// The command line differs per OS: POSIX ping takes -c/-W/-q while
-/// Windows ping takes -n/-w (milliseconds) and has no quiet flag.
+/// The command line differs per OS (see pingArgv).
 ///
 /// `observer.pinged(index, answered)` hears about each host as its
 /// child is reaped. Children are reaped in input order, so that order
@@ -892,19 +891,10 @@ fn pingSweep(run: Run, ips: []const [4]u8, observer: anytype) ![]bool {
     defer children.deinit(allocator);
     for (ip_strings) |ip_string| {
         if (run.stopRequested()) break;
-        var argv: [7][]const u8 = undefined;
-        const argc: usize = if (comptime builtin.os.tag == .windows) blk: {
-            argv[0..6].* = [_][]const u8{ "ping", "-n", "1", "-w", "1000", ip_string };
-            break :blk 6;
-        } else blk: {
-            // ping(1) -W units: milliseconds on macOS, seconds elsewhere --
-            // both spell ~1s. Matches the WARNING in src/c/ping.c.
-            const wait_arg: []const u8 = if (comptime builtin.os.tag == .macos) "1000" else "1";
-            argv[0..7].* = [_][]const u8{ "ping", "-c", "1", "-W", wait_arg, "-q", ip_string };
-            break :blk 7;
-        };
+        var argv_buf: [9][]const u8 = undefined;
+        const argv = pingArgv(&argv_buf, ip_string);
         const child = try std.process.spawn(run.io, .{
-            .argv = argv[0..argc],
+            .argv = argv,
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
@@ -916,7 +906,7 @@ fn pingSweep(run: Run, ips: []const [4]u8, observer: anytype) ![]bool {
     // discard the exit status of pings that had already answered, and
     // their hosts with it. The wait is short. A terminal Ctrl+C reaches
     // the pings too (they share ns's process group or console), and
-    // each one gives up on its own soon after anyway.
+    // each one gives up after about 1s anyway.
     for (children.items, 0..) |*child, i| {
         const term = child.wait(run.io) catch {
             observer.pinged(i, false);
@@ -929,6 +919,25 @@ fn pingSweep(run: Run, ips: []const [4]u8, observer: anytype) ![]bool {
         observer.pinged(i, alive[i]);
     }
     return alive;
+}
+
+/// One ping(1) command line that waits about 1s for a single reply,
+/// built in `buf`. Every OS spells that differently:
+/// - Windows: -n 1 -w 1000 (milliseconds), and no quiet flag.
+/// - Linux: -W 1 waits 1s for the reply (seconds; see the WARNING in
+///   src/c/ping.c).
+/// - macOS: -W 1000 is in milliseconds, yet an unanswered ping still
+///   took 2s there, so -t 1 caps the whole run at 1s.
+fn pingArgv(buf: *[9][]const u8, ip: []const u8) []const []const u8 {
+    const flags: []const []const u8 = switch (comptime builtin.os.tag) {
+        .windows => &.{ "-n", "1", "-w", "1000" },
+        .macos => &.{ "-c", "1", "-W", "1000", "-t", "1", "-q" },
+        else => &.{ "-c", "1", "-W", "1", "-q" },
+    };
+    buf[0] = "ping";
+    @memcpy(buf[1..][0..flags.len], flags);
+    buf[1 + flags.len] = ip;
+    return buf[0 .. flags.len + 2];
 }
 
 /// Slow path: ICMP ping sweep. Kept as a fallback for networks where

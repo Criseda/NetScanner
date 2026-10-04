@@ -30,6 +30,9 @@
   `--json` summary) now includes hostname resolution with `--resolve` /
   `--hostname`. It used to stop when the sweep ended, so a scan that
   spent seconds naming hosts reported only part of its time.
+- On macOS, a ping that gets no answer now gives up after 1s, as on
+  Linux and Windows, instead of 2s. `--ping` sweeps and the check of
+  quiet hosts from the ARP table finish about a second sooner.
 
 ## v1.4.0
 
