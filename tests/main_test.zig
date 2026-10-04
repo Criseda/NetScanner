@@ -8,4 +8,6 @@ test {
     _ = @import("oui_test.zig");
     _ = @import("ports_test.zig");
     _ = @import("resolver_test.zig");
+    _ = @import("progress_test.zig");
+    _ = @import("live_test.zig");
 }

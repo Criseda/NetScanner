@@ -57,13 +57,11 @@ When run without resolution flags, `ns -s` outputs the classic compact numerical
 
 ### Port scans (`ns -p`)
 
-Open ports stream as they are found, then an aligned table closes the
-scan:
+In a terminal, a status line shows progress while the scan runs (see
+[Status line and Ctrl+C](#status-line-and-ctrlc)), then an aligned
+table closes the scan:
 
 ```text
-Open port: 445 (SMB)
-Open port: 22 (SSH)
-Open port: 8123 (Home Assistant)
 PORT   SERVICE               IANA             DESCRIPTION
 22     SSH                   ssh              The Secure Shell (SSH) Protocol
 445    SMB                   microsoft-ds     Windows file sharing (SMB over TCP)
@@ -84,6 +82,42 @@ lookups. It has two sources, kept apart:
   overlay entry, `SERVICE` is the IANA name.
 
 `--timeout <ms>` caps each connect attempt (default 500).
+
+### Status line and Ctrl+C
+
+When `ns` writes text to a terminal, it shows one self-updating line on
+stderr instead of printing each result as it is found:
+
+```text
+⠹ Scanning 192.168.1.0/24… 42% · 7 hosts found
+⠼ Identifying devices… 3 of 9
+```
+
+The line is cleared when the scan ends, and the results print once, as
+the summary. Scans that finish in under 0.2s never show it.
+
+The spinner and punctuation need a UTF-8 terminal. On macOS and Linux
+that is read from the locale (`LC_ALL`, `LC_CTYPE`, then `LANG`, e.g.
+`en_GB.UTF-8`); on Windows, from the console's code page (65001 is
+UTF-8). Anywhere else the line falls back to ASCII:
+`| Scanning 192.168.1.0/24... 42% - 7 hosts found`. `ns` never changes
+the console's code page itself.
+
+Press **Ctrl+C** to stop early. Probes already in flight finish (each
+is capped by its timeout), then the results so far print with
+`interrupted` on the closing line, e.g. `7 hosts up (1.5s, interrupted)`.
+Press Ctrl+C again to quit at once. Either way `ns` exits as an
+interrupted program does (killed by SIGINT, status 130 in shells;
+`STATUS_CONTROL_C_EXIT` on Windows), so scripts never mistake a stopped
+scan for a complete one.
+
+Piped or redirected output (`ns -s ... > hosts.txt`, `| grep`) and
+`--json` keep streaming every result line by line, with no status line,
+and Ctrl+C stops them immediately as before. The same applies when
+stderr alone is redirected, in terminals that set `TERM=dumb` (Emacs
+shell mode, for one), which cannot redraw a line, and in terminals that
+report a size of zero (a pseudo terminal nobody sized, as some CI
+runners use), where the line cannot be drawn.
 
 ### Machine-readable output (`--json`)
 
@@ -129,14 +163,19 @@ always last:
   |---|---|---|
   | `-p` | `ports` | ports probed / ports in range |
   | `-s` (TCP or `--ping`) | `sweep` | IPs probed / usable hosts |
+  | `-s` (TCP) | `arp` | ARP-table entries checked / entries the sweep missed |
   | `-s --resolve` / `--hostname` | `identify` | hosts resolved / hosts found |
 
-  An event goes out only when the whole percentage changes, so a phase
-  emits at most about 100 lines whatever its size. Within a phase `done`
-  only increases, and each phase ends with exactly one `done == total`
-  event. A phase may skip counts, so show the latest event rather than
-  counting them. Phases arrive in table order, and `summary` still comes
-  last. Text output has no progress lines.
+  `arp` covers the check of quiet hosts that ignored the TCP probe but
+  sit in the ARP table: each gets one ping (about 1s at most) before it
+  counts as up. An event goes out only when the whole percentage
+  changes, so a phase emits at most about 100 lines whatever its size.
+  Within a phase `done` only increases, and each phase ends with exactly
+  one `done == total` event. A phase with nothing to do (no ARP entries
+  to check, no hosts to name) sends no events. A phase may skip counts, so show the latest event rather than
+  counting them. A `host` or `port` event always comes before the
+  progress event that counts it. Phases arrive in table order, and
+  `summary` still comes last. Text output has no progress lines.
 - Input errors print `{"type":"error","message":"..."}` and exit with
   status 1. Diagnostics (warnings) stay on stderr as plain text.
 

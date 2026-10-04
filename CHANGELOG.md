@@ -4,12 +4,44 @@
 
 - `--json` scans now report live progress, so frontends can show a real
   percentage instead of a spinner: `{"type":"progress","phase":"sweep","done":120,"total":254}`.
-  Phases are `ports` (`-p`), `sweep` (`-s`, TCP or `--ping`) and
-  `identify` (hostname resolution with `--resolve` / `--hostname`, which
-  can take seconds after the sweep is done). Events go out only when
+  Phases are `ports` (`-p`), `sweep` (`-s`, TCP or `--ping`), `arp`
+  (the ping check of quiet hosts from the ARP table, after a TCP sweep)
+  and `identify` (hostname resolution with `--resolve` / `--hostname`,
+  which can take seconds after the sweep is done). Events go out only when
   the whole percentage changes, at most about 100 per phase. `done`
   only increases, and each phase ends with one `done == total` event.
-  Existing events are unchanged and text output is unaffected.
+  A `host` or `port` event always comes before the progress event that
+  counts it. Existing events are unchanged, and text output has no
+  progress lines.
+- In a terminal, text scans show a live status line instead of printing
+  every result as it is found, e.g. `⠹ Scanning 192.168.1.0/24… 42% ·
+  7 hosts found`, then `Identifying devices… 3 of 9` during `--resolve`
+  (ASCII where the terminal is not UTF-8).
+  Results print once, in the closing summary, so hosts and ports are no
+  longer listed twice. **Behavior change** for terminals only: piped or
+  redirected output, `--json`, and terminals that cannot show the line
+  (`TERM=dumb`, or a reported size of zero) still stream line by line,
+  exactly as before.
+- Ctrl+C on a scan in a terminal now stops it and prints what it found
+  so far, marked `interrupted` (e.g. `7 hosts up (1.5s, interrupted)`),
+  instead of discarding it. A second Ctrl+C quits at once. `ns` still
+  exits as interrupted (SIGINT; `STATUS_CONTROL_C_EXIT` on Windows), so
+  scripts see the stop. If SIGINT was ignored at startup (`nohup`), it
+  stays ignored.
+- The elapsed time that closes a subnet scan (and `elapsed_ms` in its
+  `--json` summary) now includes hostname resolution with `--resolve` /
+  `--hostname`. It used to stop when the sweep ended, so a scan that
+  spent seconds naming hosts reported only part of its time.
+- On macOS, a ping that gets no answer now gives up after 1s, as on
+  Linux and Windows, instead of 2s. `--ping` sweeps and the check of
+  quiet hosts from the ARP table finish about a second sooner.
+- `--ping` sweeps hear each host the moment its ping answers, so the
+  found count (status line, or `host` events with `--json`) climbs right
+  away instead of waiting behind the first host that never answers.
+  Ranges larger than a /24 ping in waves of 256 hosts instead of
+  starting a process for every host at once.
+- A port scan that finds nothing closes with its elapsed time too, like
+  every other scan: `No open ports found (0.5s)`.
 
 ## v1.4.0
 

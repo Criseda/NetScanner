@@ -4,3 +4,5 @@ pub const main = @import("main.zig");
 pub const oui = @import("oui.zig");
 pub const ports = @import("ports.zig");
 pub const resolver = @import("resolver.zig");
+pub const progress = @import("progress.zig");
+pub const live = @import("live.zig");
