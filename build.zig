@@ -1,4 +1,7 @@
 const std = @import("std");
+/// The package manifest: `ns --version` reads its `.version`, so a
+/// release bumps the version in build.zig.zon alone.
+const manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -105,6 +108,8 @@ fn installExe(
 const Libraries = struct {
     core: *std.Build.Module,
     bindings: *std.Build.Module,
+    /// `build_options.version`, from build.zig.zon, for `ns --version`.
+    build_options: *std.Build.Step.Options,
 };
 
 /// The Zig half of NetScanner: core logic plus the C ping bindings.
@@ -128,7 +133,10 @@ fn buildLibraries(
     // module, so core needs the import edge (bindings itself needs
     // nothing from core).
     core_module.addImport("bindings", bindings_module);
-    return .{ .core = core_module, .bindings = bindings_module };
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", manifest.version);
+    core_module.addOptions("build_options", build_options);
+    return .{ .core = core_module, .bindings = bindings_module, .build_options = build_options };
 }
 
 /// Build the `ns` executable for one target.
@@ -148,6 +156,9 @@ fn buildExe(
             .{ .name = "bindings", .module = libs.bindings },
         },
     });
+    // main.zig reaches utils.zig by relative import, so the exe's own
+    // module needs the version option too, not just core.
+    exe_module.addOptions("build_options", libs.build_options);
     linkNativeDeps(b, exe_module, target);
     return b.addExecutable(.{ .name = "ns", .root_module = exe_module });
 }
