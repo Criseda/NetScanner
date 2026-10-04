@@ -144,6 +144,9 @@ pub const Live = struct {
     stop: std.Io.Event = .unset,
     /// Set from glyphs() by whoever turns the line on.
     glyphs: Glyphs = .ascii,
+    /// Whether the line is drawn with escape codes, as opposed to the
+    /// legacy Windows console API (or not at all). Set by begin().
+    escape_codes: bool = false,
 
     pub const Noun = struct { one: []const u8, many: []const u8 };
 
@@ -179,8 +182,8 @@ pub const Live = struct {
         // Repeat the test std.Progress used to pick escape codes over
         // the legacy Windows console API (it is idempotent): only an
         // escape-code line can be erased by the second Ctrl+C.
-        const escape_codes = if (std.Io.File.stderr().enableAnsiEscapeCodes(self.io)) |_| true else |_| false;
-        interrupt.eraseStatusLineOnQuit(escape_codes);
+        self.escape_codes = if (std.Io.File.stderr().enableAnsiEscapeCodes(self.io)) |_| true else |_| false;
+        interrupt.eraseStatusLineOnQuit(self.escape_codes);
     }
 
     /// Stop the ticker and clear the line, so the summary prints on a
@@ -195,6 +198,12 @@ pub const Live = struct {
         self.ticker = null;
         self.root.end();
         self.root = .none;
+        // The terminal echoes Ctrl+C (and anything typed) as `^C` at
+        // the start of the line, moving the cursor along. std.Progress
+        // clears from the cursor onwards, so when the scan ends before
+        // the next frame the echo survives and the summary prints right
+        // after it (`^C192.168.1.1`). Clear the whole line instead.
+        if (self.escape_codes) std.Io.File.stderr().writeStreamingAll(self.io, "\r\x1b[K") catch {};
     }
 
     pub fn setPhase(self: *Live, phase: Phase) void {
