@@ -8,7 +8,13 @@
 - `zig build release -Doptimize=ReleaseFast` — all five release
   binaries. CI also builds and tests on Linux, macOS and Windows.
   Build releases on a Mac: macOS binaries must be codesigned (see
-  `installAndSign` in `build.zig`) or macOS hides the ARP table.
+  `installExe` in `build.zig`) or macOS hides the ARP table.
+
+## Releasing
+
+Bump `.version` in `build.zig.zon` (`ns --version` reads it) and the
+version badges in `README.md` and `docs/README.md`, and turn
+`## Unreleased` in `CHANGELOG.md` into the version's section.
 
 ## Changelog per change
 

@@ -1,15 +1,18 @@
 # Changelog
 
-## Unreleased
+## v1.5.0
+
+Scans report their progress, to frontends and in the terminal:
 
 - `--json` scans now report live progress, so frontends can show a real
   percentage instead of a spinner: `{"type":"progress","phase":"sweep","done":120,"total":254}`.
   Phases are `ports` (`-p`), `sweep` (`-s`, TCP or `--ping`), `arp`
   (the ping check of quiet hosts from the ARP table, after a TCP sweep)
   and `identify` (hostname resolution with `--resolve` / `--hostname`,
-  which can take seconds after the sweep is done). Events go out only when
-  the whole percentage changes, at most about 100 per phase. `done`
-  only increases, and each phase ends with one `done == total` event.
+  which can take seconds after the sweep is done). Events go out only
+  when the whole percentage changes, at most about 100 per phase.
+  `done` only increases, and each phase ends with one `done == total`
+  event.
   A `host` or `port` event always comes before the progress event that
   counts it. Existing events are unchanged, and text output has no
   progress lines.
