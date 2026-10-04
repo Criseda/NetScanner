@@ -138,12 +138,7 @@ fn tcpConnectTimeout(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
 
     // Connection in progress (or already refused): wait until the socket
     // turns writable, but no longer than our timeout.
-    var pfd = [_]std.posix.pollfd{.{
-        .fd = fd,
-        .events = std.posix.POLL.OUT,
-        .revents = 0,
-    }};
-    if (std.c.poll(&pfd, 1, timeout_ms) <= 0) return .filtered;
+    if (!waitWritable(fd, timeout_ms)) return .filtered;
 
     // Writable: ask the socket what actually happened.
     var so_error: c_int = 0;
@@ -156,6 +151,37 @@ fn tcpConnectTimeout(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
         @intFromEnum(std.posix.E.CONNREFUSED), @intFromEnum(std.posix.E.CONNRESET) => .refused,
         else => .filtered,
     };
+}
+
+/// Wait until `fd` turns writable, for at most `timeout_ms` in total.
+/// False on timeout or failure. A signal handler running on this thread
+/// makes poll() fail with EINTR, and poll is never restarted, even
+/// under SA_RESTART. ns runs two while its status line is up (Ctrl+C,
+/// and the SIGWINCH redraw on a terminal resize), so the wait resumes
+/// with whatever time is left: giving up there would report an open
+/// port or a live host as filtered.
+fn waitWritable(fd: std.posix.fd_t, timeout_ms: c_int) bool {
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.OUT,
+        .revents = 0,
+    }};
+    const started = monotonicMs();
+    var left: i64 = timeout_ms;
+    while (left > 0) {
+        const rc = std.c.poll(&pfd, 1, @intCast(left));
+        if (rc > 0) return true;
+        if (rc == 0 or std.c.errno(rc) != .INTR) return false;
+        left = timeout_ms - (monotonicMs() - started);
+    }
+    return false;
+}
+
+/// Milliseconds on the monotonic clock, for measuring a wait.
+fn monotonicMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * std.time.ms_per_s + @divTrunc(@as(i64, ts.nsec), std.time.ns_per_ms);
 }
 
 // ---------------------------------------------------------------------------

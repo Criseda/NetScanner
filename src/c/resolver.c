@@ -19,6 +19,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <errno.h>
+#include <time.h>
 #endif
 
 #ifdef __APPLE__
@@ -28,6 +30,32 @@
 #include <net/route.h>
 #include <stdint.h>
 #include <sys/sysctl.h>
+#endif
+
+#ifndef _WIN32
+/* Wait up to timeout_ms for `sock` to turn readable: 1 if it did, 0 on
+ * timeout or error. A signal handler running on this thread makes poll()
+ * fail with EINTR, and poll is never restarted, even under SA_RESTART.
+ * ns runs two while its status line is up (Ctrl+C, and the SIGWINCH
+ * redraw on a terminal resize), so retry with whatever time is left
+ * instead of dropping an answer that is still on its way. */
+static int wait_readable(int sock, int timeout_ms) {
+  struct timespec start;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  struct pollfd pfd = {.fd = sock, .events = POLLIN, .revents = 0};
+  int left = timeout_ms;
+  for (;;) {
+    int rc = poll(&pfd, 1, left);
+    if (rc > 0) return 1;
+    if (rc == 0 || errno != EINTR) return 0;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L +
+                      (now.tv_nsec - start.tv_nsec) / 1000000L;
+    left = timeout_ms - (int)elapsed_ms;
+    if (left <= 0) return 0;
+  }
+}
 #endif
 
 int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len) {
@@ -126,8 +154,7 @@ int query_netbios(const char *ip_address, char *out_buf, size_t out_len,
     return -1;
   }
 #else
-  struct pollfd pfd = {.fd = sock, .events = POLLIN, .revents = 0};
-  if (poll(&pfd, 1, timeout_ms) <= 0) {
+  if (!wait_readable(sock, timeout_ms)) {
     close(sock);
     return -1;
   }
@@ -342,8 +369,7 @@ int query_mdns(const char *ip_address, char *out_buf, size_t out_len, int timeou
     return -1;
   }
 #else
-  struct pollfd pfd = {.fd = sock, .events = POLLIN, .revents = 0};
-  if (poll(&pfd, 1, timeout_ms) <= 0) {
+  if (!wait_readable(sock, timeout_ms)) {
     close(sock);
     return -1;
   }
