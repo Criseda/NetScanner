@@ -33,6 +33,11 @@
 - On macOS, a ping that gets no answer now gives up after 1s, as on
   Linux and Windows, instead of 2s. `--ping` sweeps and the check of
   quiet hosts from the ARP table finish about a second sooner.
+- `--ping` sweeps hear each host the moment its ping answers, so the
+  found count (status line, or `host` events with `--json`) climbs right
+  away instead of waiting behind the first host that never answers.
+  Ranges larger than a /24 ping in waves of 256 hosts instead of
+  starting a process for every host at once.
 
 ## v1.4.0
 

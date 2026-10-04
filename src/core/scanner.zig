@@ -444,7 +444,7 @@ fn recordOpenPort(shares: PortShares, port: u16) void {
 // ---------------------------------------------------------------------------
 // Host discovery: a fixed pool of workers, each pulling the next IP
 // from a shared index. The ping fallback (scanNetworkPing) does not
-// use this machinery; it batches child processes instead.
+// use this machinery; it runs waves of ping processes (pingSweep).
 // ---------------------------------------------------------------------------
 
 pub const NetworkScanOptions = struct {
@@ -855,70 +855,107 @@ fn printScanHeader(run: Run, cidr: []const u8, range: utils.IpRange) void {
     });
 }
 
-/// Ping every IP in the list with one child process each, all running
-/// concurrently. Returns which hosts answered, same order as input.
+/// How many ping(1) processes run at once. A /24 still pings every
+/// host at once; larger ranges go in waves of this many, instead of
+/// starting a process per host all together (a /16 would be 65,534,
+/// far past the per-user process limit).
+const MAX_PING_PROCESSES = 256;
+
+/// Ping every IP in the list and return which answered, in input order.
+/// Hosts never pinged (after a stop request) count as unanswered.
 /// Caller frees the result.
 ///
-/// One batch instead of one process per thread: libc serializes
-/// concurrent system() calls process-wide, which used to turn every
-/// ping sweep serial (~2s/host). posix-spawned children have no such
-/// lock, so a whole subnet resolves in about one wait each.
+/// Pings run in waves of up to MAX_PING_PROCESSES, so a /24 takes about
+/// one ping wait. Each wave is spawned from this thread, one process
+/// after another (std's spawn allocates, which only slows down when
+/// hundreds of threads do it at once), then every ping gets a thread of
+/// its own to wait on it. So results arrive in completion order: a dead
+/// host no longer holds back the answers behind it, as it did when the
+/// pings were reaped in input order.
 ///
-/// The command line differs per OS (see pingArgv).
-///
-/// `observer.pinged(index, answered)` hears about each host as its
-/// child is reaped. Children are reaped in input order, so that order
-/// rather than completion order sets the pace. After a stop request no
-/// more pings start, and those already running still finish (see the
-/// reap loop).
+/// `observer.pinged(index, answered)` runs on the waiting thread as each
+/// ping ends. After a stop request no new pings start. Those running
+/// are waited for, never killed: killing would discard the exit status
+/// of pings that had already answered, and their hosts with it. The
+/// wait is short. A terminal Ctrl+C reaches the pings too (they share
+/// ns's process group or console), and each gives up after about 1s
+/// anyway. If a ping cannot even start (out of processes, say), the
+/// sweep stops, waits for the pings already running, and returns that
+/// error.
 fn pingSweep(run: Run, ips: []const [4]u8, observer: anytype) ![]bool {
-    const allocator = run.allocator;
-    const alive = try allocator.alloc(bool, ips.len);
-    errdefer allocator.free(alive);
+    const alive = try run.allocator.alloc(bool, ips.len);
+    errdefer run.allocator.free(alive);
     // Hosts never pinged (the sweep was stopped) count as unanswered.
     @memset(alive, false);
 
-    const ip_strings = try allocator.alloc([]const u8, ips.len);
-    defer {
-        for (ip_strings) |s| allocator.free(s);
-        allocator.free(ip_strings);
+    var first: usize = 0;
+    while (first < ips.len and !run.stopRequested()) {
+        const last = @min(first + MAX_PING_PROCESSES, ips.len);
+        try pingWave(run, ips, first, last, alive, observer);
+        first = last;
     }
-    for (ips, 0..) |ip, i| {
-        ip_strings[i] = try utils.ipBytesToString(allocator, ip);
-    }
+    return alive;
+}
 
-    var children: std.ArrayList(std.process.Child) = .empty;
-    defer children.deinit(allocator);
-    for (ip_strings) |ip_string| {
+/// One wave of pingSweep: ips[first..last], at most MAX_PING_PROCESSES.
+fn pingWave(
+    run: Run,
+    ips: []const [4]u8,
+    first: usize,
+    last: usize,
+    alive: []bool,
+    observer: anytype,
+) !void {
+    const Waiter = struct {
+        run: Run,
+        child: std.process.Child,
+        index: usize,
+        alive: []bool,
+        observer: @TypeOf(observer),
+
+        fn wait(w: *@This()) void {
+            const term = w.child.wait(w.run.io) catch null;
+            const answered = if (term) |t| switch (t) {
+                .exited => |code| code == 0,
+                else => false,
+            } else false;
+            w.alive[w.index] = answered;
+            w.observer.pinged(w.index, answered);
+        }
+    };
+    var waiters: [MAX_PING_PROCESSES]Waiter = undefined;
+    var threads: [MAX_PING_PROCESSES]?Thread = undefined;
+    var spawned: usize = 0;
+    var spawn_error: ?anyerror = null;
+
+    for (ips[first..last], first..) |ip, index| {
         if (run.stopRequested()) break;
+        // Dotted IPv4 is at most 15 characters, so this cannot fail.
+        var ip_buf: [15]u8 = undefined;
+        const ip_text = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch unreachable;
         var argv_buf: [9][]const u8 = undefined;
-        const argv = pingArgv(&argv_buf, ip_string);
-        const child = try std.process.spawn(run.io, .{
-            .argv = argv,
+        const child = std.process.spawn(run.io, .{
+            .argv = pingArgv(&argv_buf, ip_text),
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
-        });
-        try children.append(allocator, child);
+        }) catch |err| {
+            spawn_error = err;
+            break;
+        };
+        waiters[spawned] = .{ .run = run, .child = child, .index = index, .alive = alive, .observer = observer };
+        spawned += 1;
     }
 
-    // Waited for even after a stop request, never killed: killing would
-    // discard the exit status of pings that had already answered, and
-    // their hosts with it. The wait is short. A terminal Ctrl+C reaches
-    // the pings too (they share ns's process group or console), and
-    // each one gives up after about 1s anyway.
-    for (children.items, 0..) |*child, i| {
-        const term = child.wait(run.io) catch {
-            observer.pinged(i, false);
-            continue;
-        };
-        alive[i] = switch (term) {
-            .exited => |code| code == 0,
-            else => false,
-        };
-        observer.pinged(i, alive[i]);
+    // A thread per ping, so each is heard the moment it ends. If a
+    // thread cannot start, its ping is waited for after the others.
+    for (waiters[0..spawned], threads[0..spawned]) |*waiter, *thread| {
+        thread.* = Thread.spawn(.{}, Waiter.wait, .{waiter}) catch null;
     }
-    return alive;
+    for (waiters[0..spawned], threads[0..spawned]) |*waiter, thread| {
+        if (thread) |t| t.join() else waiter.wait();
+    }
+    if (spawn_error) |err| return err;
 }
 
 /// One ping(1) command line that waits about 1s for a single reply,
