@@ -29,7 +29,7 @@ test "tcpConnectPort maps an unroutable host to filtered" {
     try std.testing.expectEqual(scanner.ProbeOutcome.filtered, outcome);
 }
 
-// NOTE: progress=true (the CLI default) has no automated test on
+// NOTE: stream_results=true (the CLI default) has no automated test on
 // purpose: under `zig build test` the runner speaks its protocol
 // over stdout, so test output there hangs the run. Streaming output
 // is verified manually against the built binary instead.
@@ -41,7 +41,7 @@ test "scanPorts rejects a reversed range" {
         .{ 127, 0, 0, 1 },
         200,
         100,
-        .{ .progress = false },
+        .{ .stream_results = false },
     );
     try std.testing.expectError(error.InvalidPortRange, result);
 }
@@ -74,7 +74,7 @@ test "scanPorts finds a locally bound open port" {
         .{ 127, 0, 0, 1 },
         bound.port,
         bound.port,
-        .{ .progress = false },
+        .{ .stream_results = false },
     );
     defer open.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), open.items.len);
@@ -96,7 +96,7 @@ test "scanPorts honors a custom timeout override" {
         .{ 127, 0, 0, 1 },
         bound.port,
         bound.port,
-        .{ .progress = false, .timeout_ms = 50 },
+        .{ .stream_results = false, .timeout_ms = 50 },
     );
     defer open.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), open.items.len);
@@ -121,7 +121,7 @@ test "scanPorts returns open ports sorted" {
         .{ 127, 0, 0, 1 },
         first.port,
         second.port,
-        .{ .progress = false },
+        .{ .stream_results = false },
     );
     defer open.deinit(std.testing.allocator);
 
@@ -147,7 +147,7 @@ test "scanPorts stays sorted over multiple worker waves" {
         .{ 127, 0, 0, 1 },
         1,
         300,
-        .{ .progress = false },
+        .{ .stream_results = false },
     );
     defer open.deinit(std.testing.allocator);
     try assertSorted(u16, open.items);

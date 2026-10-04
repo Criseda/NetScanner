@@ -27,7 +27,7 @@ selling point: any change requiring privileges does not belong here.
   `zig build test` speak the build protocol over stdout
   (`compiler/test_runner.zig`, `--listen=-`); stray writes corrupt
   the stream and hang the runner with no output. `std.debug.print`
-  (stderr) is fine. `scanPorts` has `ScanOptions.progress` exactly so
+  (stderr) is fine. Scans take `stream_results = false` exactly so
   tests can run quietly; the streaming output is verified manually.
 
 ## Style

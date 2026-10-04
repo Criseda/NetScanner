@@ -214,6 +214,28 @@ fn advanceProgress(io: std.Io, stdout_mutex: *std.Io.Mutex, meter: ?*ProgressMet
 // Port scanning: try every TCP port in a range on one IP.
 // ---------------------------------------------------------------------------
 
+pub const ScanOptions = struct {
+    /// Print each open port as it is found ("Open port: N", or a `port`
+    /// event with --json), plus --json `progress` events. The CLI turns
+    /// this off only for its status line, where the closing table is
+    /// the one listing. Tests turn it off too: test binaries running
+    /// under `zig build test` speak the build protocol over stdout, and
+    /// stray writes hang the runner.
+    stream_results: bool = true,
+    /// Per-probe wait cap in milliseconds. Null selects
+    /// PORT_TIMEOUT_MS. Exposed as `ns -p ... --timeout <ms>` for
+    /// unusually slow networks; lower it on a fast LAN for even
+    /// quicker sweeps.
+    timeout_ms: ?u16 = null,
+    /// Stream `{"type":"port",...}` lines instead of "Open port: N (name)",
+    /// plus `progress` events (phase `ports`), when stream_results is on.
+    json: bool = false,
+    /// Interactive status line. The caller owns it and sets the phase;
+    /// workers count open ports on it. Normally paired with
+    /// stream_results = false, since the summary prints the ports anyway.
+    live: ?*Live = null,
+};
+
 /// Scan start_port..end_port (inclusive) on one IP and return the
 /// open ports, sorted ascending. Callers pass start_port <= end_port
 /// (the CLI swaps reversed ranges itself); anything else is
@@ -221,28 +243,8 @@ fn advanceProgress(io: std.Io, stdout_mutex: *std.Io.Mutex, meter: ?*ProgressMet
 ///
 /// A fixed pool of workers pulls ports from a shared atomic counter:
 /// no thread-per-port, no sleeps, no per-port stderr. Only open ports
-/// print, and only when options.progress is set; closed and filtered
-/// both mean "not open" and stay silent either way.
-pub const ScanOptions = struct {
-    /// Stream "Open port: N" lines while scanning. The CLI keeps this
-    /// on for live feedback; tests turn it off, because test binaries
-    /// running under `zig build test` speak the build protocol over
-    /// stdout and stray writes hang the runner.
-    progress: bool = true,
-    /// Per-probe wait cap in milliseconds. Null selects
-    /// PORT_TIMEOUT_MS. Exposed as `ns -p ... --timeout <ms>` for
-    /// unusually slow networks; lower it on a fast LAN for even
-    /// quicker sweeps.
-    timeout_ms: ?u16 = null,
-    /// Stream `{"type":"port",...}` lines instead of "Open port: N (name)",
-    /// plus `progress` events (phase `ports`) when `progress` is on.
-    json: bool = false,
-    /// Interactive status line. The caller owns it and sets the phase;
-    /// workers count open ports on it. Normally paired with
-    /// progress = false, since the summary prints the ports anyway.
-    live: ?*Live = null,
-};
-
+/// print, and only when options.stream_results is set; closed and
+/// filtered both mean "not open" and stay silent either way.
 pub fn scanPorts(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -258,7 +260,7 @@ pub fn scanPorts(
     const timeout_ms: c_int = if (options.timeout_ms) |t| t else PORT_TIMEOUT_MS;
 
     const total: usize = @as(usize, end_port) - start_port + 1;
-    var meter: ProgressMeter = .{ .phase = "ports", .total = total, .emit_json = options.json and options.progress };
+    var meter: ProgressMeter = .{ .phase = "ports", .total = total, .emit_json = options.json and options.stream_results };
     if (options.live) |live| live.setMeter(&meter);
     // The caller's status line outlives this frame: detach on every
     // return path, so its ticker never reads a dead meter.
@@ -271,7 +273,7 @@ pub fn scanPorts(
         errdefer open_ports.deinit(allocator);
         var stdout_mutex: std.Io.Mutex = .init;
         if (tcpConnectPort(ip_address, start_port, timeout_ms) == .open) {
-            if (options.progress) {
+            if (options.stream_results) {
                 printOpenPort(io, &stdout_mutex, start_port, options.json);
             }
             if (options.live) |live| live.addFound();
@@ -314,7 +316,7 @@ pub fn scanPorts(
         .open_ports = &open_ports,
         .ports_mutex = &ports_mutex,
         .stdout_mutex = &stdout_mutex,
-        .progress = options.progress,
+        .stream_results = options.stream_results,
         .timeout_ms = timeout_ms,
         .json = options.json,
         .meter = &meter,
@@ -351,7 +353,7 @@ const PortShares = struct {
     open_ports: *std.ArrayList(u16),
     ports_mutex: *std.Io.Mutex,
     stdout_mutex: *std.Io.Mutex,
-    progress: bool,
+    stream_results: bool,
     timeout_ms: c_int,
     json: bool,
     meter: *ProgressMeter,
@@ -399,7 +401,7 @@ fn portWorker(shares: PortShares) void {
 }
 
 fn recordOpenPort(shares: PortShares, port: u16) void {
-    if (shares.progress) {
+    if (shares.stream_results) {
         printOpenPort(shares.io, shares.stdout_mutex, port, shares.json);
     }
     if (shares.live) |live| live.addFound();

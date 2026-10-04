@@ -143,7 +143,7 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process
         .{
             .timeout_ms = timeout_ms,
             .json = json,
-            .progress = !interactive,
+            .stream_results = !interactive,
             .live = if (interactive) &live else null,
         },
     );
