@@ -40,6 +40,8 @@
   away instead of waiting behind the first host that never answers.
   Ranges larger than a /24 ping in waves of 256 hosts instead of
   starting a process for every host at once.
+- A port scan that finds nothing closes with its elapsed time too, like
+  every other scan: `No open ports found (0.5s)`.
 
 ## v1.4.0
 

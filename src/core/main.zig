@@ -169,8 +169,10 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process
         }
         utils.printStdout(io, &stdout_mutex, "],\"elapsed_ms\":{d}}}\n", .{elapsed_ms});
     } else if (open_ports.items.len == 0) {
-        const note: []const u8 = if (interrupt.requested()) " (interrupted)" else "";
-        utils.printStdout(io, &stdout_mutex, "No open ports found{s}\n", .{note});
+        // Same closing line as the table's and the subnet scans': the
+        // time, and whether the scan was stopped early.
+        const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+        utils.printStdout(io, &stdout_mutex, "No open ports found ({d:.1}s{s})\n", .{ seconds, scanner.interruptedNote(interrupt.requested()) });
     } else {
         printPortTable(io, &stdout_mutex, open_ports.items, elapsed_ns);
     }
