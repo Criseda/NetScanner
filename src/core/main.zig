@@ -64,7 +64,7 @@ fn setUpInteractive(io: std.Io, env: *const std.process.Environ.Map, json: bool,
 /// "Scanning <target>" for the status line, in caller storage that
 /// outlives the scan. Falls back to a bare verb if the target is long.
 fn scanLabel(buf: []u8, target: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "Scanning {s}", .{target}) catch "Scanning";
+    return std.mem.print(buf, "Scanning {s}", .{target}) catch "Scanning";
 }
 
 fn hasFlag(args: []const [:0]const u8, flag: []const u8) bool {
@@ -81,7 +81,7 @@ fn hasFlag(args: []const [:0]const u8, flag: []const u8) bool {
 /// caller is already reading events.
 fn fail(io: std.Io, json: bool, comptime fmt: []const u8, args: anytype) noreturn {
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch fmt;
+    const msg = std.mem.print(&msg_buf, fmt, args) catch fmt;
     if (json) {
         var esc_buf: [512]u8 = undefined;
         var stdout_mutex: std.Io.Mutex = .init;
@@ -199,7 +199,7 @@ fn printPortTable(io: std.Io, stdout_mutex: *std.Io.Mutex, open_ports: []const u
     out.print(row, .{ "PORT", "SERVICE", "IANA", "DESCRIPTION" }) catch return;
     for (open_ports) |port| {
         var port_buf: [5]u8 = undefined;
-        const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch unreachable;
+        const port_str = std.mem.print(&port_buf, "{d}", .{port}) catch unreachable;
         const service = ports.lookup(port);
         out.print(row, .{
             port_str,
