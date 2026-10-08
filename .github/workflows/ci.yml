@@ -28,11 +28,11 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@v4
 
-      # Pinned to build.zig.zon's minimum_zig_version (0.16.0).
-      - name: Set up Zig 0.16.0
+      # Pinned to build.zig.zon's minimum_zig_version (0.17.0).
+      - name: Set up Zig 0.17.0
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Show the Zig version
         run: zig version

@@ -86,9 +86,7 @@ pub fn tcpConnectPort(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
 /// characters plus the terminator.
 fn tcpConnectWinsock(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
     var addr_buf: [16]u8 = undefined;
-    const addr = std.fmt.bufPrintZ(&addr_buf, "{d}.{d}.{d}.{d}", .{
-        ip[0], ip[1], ip[2], ip[3],
-    }) catch return .filtered;
+    const addr = utils.ipToCString(&addr_buf, ip);
     return switch (c_bindings.tcpProbe(addr, port, timeout_ms)) {
         .open => .open,
         .refused => .refused,
@@ -134,7 +132,7 @@ fn tcpConnectTimeout(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
     }
     return switch (so_error) {
         0 => .open,
-        @intFromEnum(std.posix.E.CONNREFUSED), @intFromEnum(std.posix.E.CONNRESET) => .refused,
+        @backingInt(std.posix.E.CONNREFUSED), @backingInt(std.posix.E.CONNRESET) => .refused,
         else => .filtered,
     };
 }
@@ -671,9 +669,7 @@ fn collectDetails(d: Discovery, options: NetworkScanOptions, oui_db: *oui.OuiDat
         // when vendor resolution is requested.
         if (mac == null and options.resolve_vendor) {
             var ip_buf: [16]u8 = undefined;
-            if (std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] })) |ip_str| {
-                mac = c_bindings.getMacSendArp(ip_str.ptr);
-            } else |_| {}
+            mac = c_bindings.getMacSendArp(utils.ipToCString(&ip_buf, ip).ptr);
         }
         detail.* = .{ .ip = ip, .mac = mac };
     }
@@ -1044,17 +1040,14 @@ pub fn scanNetworkPing(
 }
 
 /// Ping one host through the C helper. Returns true when it answers.
-/// Anything the ping cannot even attempt (bad address, no memory)
-/// counts as unanswered rather than as an error. On Windows a failed
+/// Anything the ping cannot even attempt (bad address) counts as
+/// unanswered rather than as an error. On Windows a failed
 /// ping also logs the Winsock error, so silent misses stay diagnosable.
-pub fn pingHost(allocator: std.mem.Allocator, ip: [4]u8) bool {
-    const ip_string = utils.ipBytesToString(allocator, ip) catch return false;
-    defer allocator.free(ip_string);
+pub fn pingHost(ip: [4]u8) bool {
+    var ip_buf: [16]u8 = undefined;
+    const ip_string = utils.ipToCString(&ip_buf, ip);
 
-    const ip_with_null = allocator.dupeZ(u8, ip_string) catch return false;
-    defer allocator.free(ip_with_null);
-
-    const ok = c_bindings.pingHost(ip_with_null.ptr);
+    const ok = c_bindings.pingHost(ip_string.ptr);
     if (!ok) {
         const err = c_bindings.pingLastError();
         if (err != 0) std.debug.print("ping {s} failed: Winsock error {d}\n", .{ ip_string, err });
@@ -1221,10 +1214,8 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
                 const idx = j.next.fetchAdd(1, .monotonic);
                 if (idx >= j.targets.len) break;
                 const ip = j.targets[idx];
-                // Dotted IPv4 is at most 15 characters plus the terminator.
                 var ip_buf: [16]u8 = undefined;
-                const ip_str = std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch unreachable;
-                if (c_bindings.getMacSendArp(ip_str.ptr)) |mac| {
+                if (c_bindings.getMacSendArp(utils.ipToCString(&ip_buf, ip).ptr)) |mac| {
                     j.shares.recordMac(ip, mac);
                     j.shares.reportHost(ip, .arp);
                 }

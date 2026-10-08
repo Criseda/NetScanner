@@ -36,6 +36,14 @@ test "ipBytesToString converts bytes to string correctly" {
     try std.testing.expectEqualStrings("192.168.0.1", result);
 }
 
+test "ipToCString fits the longest address and terminates it" {
+    var buf: [16]u8 = undefined;
+    const longest = utils.ipToCString(&buf, .{ 255, 255, 255, 255 });
+    try std.testing.expectEqualStrings("255.255.255.255", longest);
+    try std.testing.expectEqual(@as(u8, 0), longest.ptr[longest.len]);
+    try std.testing.expectEqualStrings("10.0.0.1", utils.ipToCString(&buf, .{ 10, 0, 0, 1 }));
+}
+
 test "splitStringToIntArray handles port range correctly" {
     const allocator = std.testing.allocator;
     const result = try utils.splitStringToIntArray(allocator, "1-1024", '-');

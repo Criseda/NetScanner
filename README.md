@@ -1,7 +1,7 @@
 # NetScanner
 
 ![Version](https://img.shields.io/badge/Version-v1.5.0-red)
-![Language](https://img.shields.io/badge/Language-0.16.0-orange?logo=zig&logoSize=auto)
+![Language](https://img.shields.io/badge/Language-0.17.0-orange?logo=zig&logoSize=auto)
 ![OS](https://img.shields.io/badge/OS-Linux%2C%20MacOS%2C%20Windows-blue)
 ![License](https://img.shields.io/badge/License-GNU%20GPL--3.0-green)
 
@@ -20,7 +20,7 @@ scan.
 
 ## Install
 
-Requires [Zig](https://ziglang.org/) 0.16.0 or newer (see
+Requires [Zig](https://ziglang.org/) 0.17.0 (see
 `build.zig.zon`) when building from source.
 
 Download a prebuilt binary from

@@ -163,6 +163,13 @@ pub fn ipBytesToString(allocator: std.mem.Allocator, ip: [4]u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
 }
 
+/// Dotted IPv4 as a C string for the C helpers, in caller storage. At
+/// most 15 characters plus the terminator fit the buffer, so this
+/// cannot fail.
+pub fn ipToCString(buf: *[16]u8, ip: [4]u8) [:0]const u8 {
+    return std.mem.printSentinel(buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }, 0) catch unreachable;
+}
+
 /// Split "1-1024" on the delimiter into port numbers.
 /// Rejects non-digits, zeros and values above 65535.
 pub fn splitStringToIntArray(allocator: std.mem.Allocator, string: []const u8, delimiter: u8) !([]u16) {

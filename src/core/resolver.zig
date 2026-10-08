@@ -8,9 +8,7 @@ const utils = @import("utils.zig");
 /// Returns an allocated string for the caller to free, or null if unknown.
 pub fn resolveHostName(allocator: std.mem.Allocator, ip: [4]u8) ?[]const u8 {
     var ip_buf: [16]u8 = undefined;
-    const ip_str = std.fmt.bufPrintZ(&ip_buf, "{d}.{d}.{d}.{d}", .{
-        ip[0], ip[1], ip[2], ip[3],
-    }) catch return null;
+    const ip_str = utils.ipToCString(&ip_buf, ip);
 
     var name_buf: [256]u8 = undefined;
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Requires Zig 0.17.0 (was 0.16.0), which removed `b.args`,
+  `std.fmt.bufPrintZ` and `Allocator.dupeZ` and deprecated
+  `@intFromEnum`. Zig 0.16.0 no longer builds the project.
+
 ## v1.5.0
 
 Scans report their progress, to frontends and in the terminal:
