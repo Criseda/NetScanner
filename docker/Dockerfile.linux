@@ -7,7 +7,7 @@ FROM ubuntu:24.04
 ARG ZIG_VERSION
 ARG TARGETARCH
 
-# Compiler (zig links libc and compiles ping.c), downloader, and the
+# Compiler (zig links libc and compiles the C helpers), downloader, and the
 # network tools the scanner and its ground-truth checks need:
 # ping for the --ping path, arp for the harvest pass, ip for setup.
 RUN apt-get update && apt-get install -y --no-install-recommends \

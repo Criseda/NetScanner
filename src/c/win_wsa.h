@@ -1,8 +1,8 @@
 #ifndef WIN_WSA_H
 #define WIN_WSA_H
 
-// One-time Winsock setup shared by the Windows helpers in ping.c and
-// tcp_probe.c. Calling WSAStartup/WSACleanup per operation is wrong
+// One-time Winsock setup shared by the Windows helpers in resolver.c
+// and tcp_probe.c. Calling WSAStartup/WSACleanup per operation is wrong
 // under threads: one thread's WSACleanup can tear down Winsock while
 // another thread is mid-call, failing requests at random (#24). So
 // each helper starts Winsock exactly once and balances it with one
