@@ -26,14 +26,11 @@ test "ipStringToBytes accepts zero octets" {
     try std.testing.expectEqualSlices(u8, &[4]u8{ 0, 0, 0, 0 }, &result);
 }
 
-test "ipBytesToString converts bytes to string correctly" {
-    const ip: [4]u8 = [4]u8{ 192, 168, 0, 1 };
-    const allocator = std.testing.allocator;
-
-    const result = try utils.ipBytesToString(allocator, ip);
-    defer allocator.free(result);
-
-    try std.testing.expectEqualStrings("192.168.0.1", result);
+test "formatIp fits the longest address" {
+    var buf: [15]u8 = undefined;
+    try std.testing.expectEqualStrings("192.168.0.1", utils.formatIp(&buf, .{ 192, 168, 0, 1 }));
+    try std.testing.expectEqualStrings("255.255.255.255", utils.formatIp(&buf, .{ 255, 255, 255, 255 }));
+    try std.testing.expectEqualStrings("0.0.0.0", utils.formatIp(&buf, .{ 0, 0, 0, 0 }));
 }
 
 test "ipToCString fits the longest address and terminates it" {

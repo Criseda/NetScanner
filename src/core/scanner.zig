@@ -743,7 +743,7 @@ fn printDetails(run: Run, details: []const HostDetail, options: NetworkScanOptio
     var writer: std.Io.File.Writer = .initStreaming(.stdout(), run.io, &buf);
     const out = &writer.interface;
 
-    var ip_str_buf: [16]u8 = undefined;
+    var ip_str_buf: [15]u8 = undefined;
     var mac_str_buf: [17]u8 = undefined;
 
     if (run.json) {
@@ -752,7 +752,7 @@ fn printDetails(run: Run, details: []const HostDetail, options: NetworkScanOptio
         var h_buf: [768]u8 = undefined;
         var v_buf: [768]u8 = undefined;
         for (details) |d| {
-            const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+            const ip_str = utils.formatIp(&ip_str_buf, d.ip);
             out.print("{{\"type\":\"host_detail\",\"ip\":\"{s}\"", .{ip_str}) catch return;
             if (options.resolve_hostname) {
                 if (d.hostname) |h| {
@@ -786,7 +786,7 @@ fn printDetails(run: Run, details: []const HostDetail, options: NetworkScanOptio
         if (options.resolve_hostname and options.resolve_vendor) {
             out.print("{s: <17}{s: <26}{s: <19}{s}\n", .{ "IP", "HOSTNAME", "MAC", "MANUFACTURER" }) catch return;
             for (details) |d| {
-                const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+                const ip_str = utils.formatIp(&ip_str_buf, d.ip);
                 const h_str = d.hostname orelse "-";
                 const mac_str = if (d.mac) |m| utils.formatMac(&mac_str_buf, m) else "-";
                 const v_str = d.vendor orelse "-";
@@ -796,7 +796,7 @@ fn printDetails(run: Run, details: []const HostDetail, options: NetworkScanOptio
         } else if (options.resolve_hostname) {
             out.print("{s: <17}{s}\n", .{ "IP", "HOSTNAME" }) catch return;
             for (details) |d| {
-                const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+                const ip_str = utils.formatIp(&ip_str_buf, d.ip);
                 const h_str = d.hostname orelse "-";
                 out.print("{s: <17}{s}\n", .{ ip_str, h_str }) catch return;
                 out.flush() catch return;
@@ -804,7 +804,7 @@ fn printDetails(run: Run, details: []const HostDetail, options: NetworkScanOptio
         } else if (options.resolve_vendor) {
             out.print("{s: <17}{s: <19}{s}\n", .{ "IP", "MAC", "MANUFACTURER" }) catch return;
             for (details) |d| {
-                const ip_str = std.fmt.bufPrint(&ip_str_buf, "{d}.{d}.{d}.{d}", .{ d.ip[0], d.ip[1], d.ip[2], d.ip[3] }) catch "";
+                const ip_str = utils.formatIp(&ip_str_buf, d.ip);
                 const mac_str = if (d.mac) |m| utils.formatMac(&mac_str_buf, m) else "-";
                 const v_str = d.vendor orelse "-";
                 out.print("{s: <17}{s: <19}{s}\n", .{ ip_str, mac_str, v_str }) catch return;
@@ -926,9 +926,8 @@ fn pingWave(
 
     for (ips[first..last], first..) |ip, index| {
         if (run.stopRequested()) break;
-        // Dotted IPv4 is at most 15 characters, so this cannot fail.
         var ip_buf: [15]u8 = undefined;
-        const ip_text = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch unreachable;
+        const ip_text = utils.formatIp(&ip_buf, ip);
         var argv_buf: [9][]const u8 = undefined;
         const child = std.process.spawn(run.io, .{
             .argv = pingArgv(&argv_buf, ip_text),
@@ -1037,22 +1036,6 @@ pub fn scanNetworkPing(
     }
 
     reportResults(discovery, options, started);
-}
-
-/// Ping one host through the C helper. Returns true when it answers.
-/// Anything the ping cannot even attempt (bad address) counts as
-/// unanswered rather than as an error. On Windows a failed
-/// ping also logs the Winsock error, so silent misses stay diagnosable.
-pub fn pingHost(ip: [4]u8) bool {
-    var ip_buf: [16]u8 = undefined;
-    const ip_string = utils.ipToCString(&ip_buf, ip);
-
-    const ok = c_bindings.pingHost(ip_string.ptr);
-    if (!ok) {
-        const err = c_bindings.pingLastError();
-        if (err != 0) std.debug.print("ping {s} failed: Winsock error {d}\n", .{ ip_string, err });
-    }
-    return ok;
 }
 
 // ---------------------------------------------------------------------------
