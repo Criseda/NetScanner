@@ -128,10 +128,10 @@ test "scanPorts returns open ports sorted" {
 
     // Both bound ports must be present, in ascending order, whatever
     // else the machine has listening inside the window.
-    try std.testing.expect(std.mem.indexOfScalar(u16, open.items, first.port) != null);
-    try std.testing.expect(std.mem.indexOfScalar(u16, open.items, second.port) != null);
-    const ia = std.mem.indexOfScalar(u16, open.items, first.port).?;
-    const ib = std.mem.indexOfScalar(u16, open.items, second.port).?;
+    try std.testing.expect(std.mem.findScalar(u16, open.items, first.port) != null);
+    try std.testing.expect(std.mem.findScalar(u16, open.items, second.port) != null);
+    const ia = std.mem.findScalar(u16, open.items, first.port).?;
+    const ib = std.mem.findScalar(u16, open.items, second.port).?;
     try std.testing.expect(ia < ib);
     try assertSorted(u16, open.items);
 }
@@ -191,7 +191,7 @@ test "scanPorts counts every port, and each open one, on the caller's tracker" {
     try std.testing.expectEqual(@as(usize, 10), snapshot.done);
     // Other listeners may sit in the range: found matches what came back.
     try std.testing.expectEqual(open.items.len, snapshot.found);
-    try std.testing.expect(std.mem.indexOfScalar(u16, open.items, bound.port) != null);
+    try std.testing.expect(std.mem.findScalar(u16, open.items, bound.port) != null);
 }
 
 test "scanPorts probes nothing once cancelled" {

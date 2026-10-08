@@ -96,8 +96,10 @@ fn installExe(
         "codesign-ns",
     });
     sign.setName(b.fmt("codesign {s}", .{exe.out_filename}));
-    sign.addArtifactArg(exe);
-    const signed = sign.addOutputFileArg(exe.out_filename);
+    // The `2` forms replace addArtifactArg/addOutputFileArg in Zig 0.17;
+    // `.{}` passes a plain relative path, as those did.
+    sign.addArtifactArg2(exe, .{});
+    const signed = sign.addOutputFileArg2(exe.out_filename, .{});
     sign.addArg(CODESIGN_IDENTIFIER);
     const install = b.addInstallFileWithDir(signed, dest_dir, exe.out_filename);
     return &install.step;
@@ -115,7 +117,7 @@ const Libraries = struct {
 fn buildLibraries(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) Libraries {
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/core.zig"),
@@ -141,7 +143,7 @@ fn buildLibraries(
 fn buildExe(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Step.Compile {
     const libs = buildLibraries(b, target, optimize);
     const exe_module = b.createModule(.{

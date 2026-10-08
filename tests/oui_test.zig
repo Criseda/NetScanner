@@ -71,7 +71,7 @@ test "OuiDatabase loadFile parses colon and dash delimiters and allows reload" {
     ;
     try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "custom_manuf.txt", .data = sample_content });
 
-    const abs_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/custom_manuf.txt", .{tmp_dir.sub_path});
+    const abs_path = try std.testing.allocator.print(".zig-cache/tmp/{s}/custom_manuf.txt", .{tmp_dir.sub_path});
     defer std.testing.allocator.free(abs_path);
 
     var db = oui.OuiDatabase.init(std.testing.allocator);

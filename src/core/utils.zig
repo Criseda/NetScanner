@@ -329,7 +329,7 @@ pub fn parseMac(s: []const u8) ?[6]u8 {
 
 /// Format a MAC address into "aa:bb:cc:dd:ee:ff" lowercase string.
 pub fn formatMac(buf: *[17]u8, mac: [6]u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{
+    return std.mem.print(buf, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
     }) catch "00:00:00:00:00:00";
 }
@@ -345,35 +345,35 @@ pub fn formatMac(buf: *[17]u8, mac: [6]u8) []const u8 {
 pub fn parseArpEntry(line: []const u8) ?ArpEntry {
     const trimmed = std.mem.trim(u8, line, " \t\r");
     if (trimmed.len == 0) return null;
-    if (std.mem.indexOf(u8, trimmed, "incomplete") != null) return null;
-    if (std.mem.indexOf(u8, trimmed, "FAILED") != null) return null;
+    if (std.mem.find(u8, trimmed, "incomplete") != null) return null;
+    if (std.mem.find(u8, trimmed, "FAILED") != null) return null;
 
     // `arp -a` on macOS/Linux puts the address in parentheses ...
-    if (std.mem.indexOfScalar(u8, trimmed, '(')) |open| {
-        const close = std.mem.indexOfScalarPos(u8, trimmed, open, ')') orelse return null;
+    if (std.mem.findScalar(u8, trimmed, '(')) |open| {
+        const close = std.mem.findScalarPos(u8, trimmed, open, ')') orelse return null;
         const ip = ipStringToBytes(trimmed[open + 1 .. close]) catch return null;
         if (ip[0] >= 224) return null;
 
         var mac: ?[6]u8 = null;
-        if (std.mem.indexOfPos(u8, trimmed, close, " at ")) |at_pos| {
+        if (std.mem.findPos(u8, trimmed, close, " at ")) |at_pos| {
             const rest = std.mem.trimStart(u8, trimmed[at_pos + 4 ..], " \t");
-            const mac_end = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+            const mac_end = std.mem.findAny(u8, rest, " \t") orelse rest.len;
             mac = parseMac(rest[0..mac_end]);
         }
         return ArpEntry{ .ip = ip, .mac = mac, .is_reachable = false };
     }
 
     // Linux `ip neigh` has " lladdr " and reachability states (REACHABLE, DELAY, STALE, etc.)
-    if (std.mem.indexOf(u8, trimmed, " lladdr ")) |lladdr_pos| {
-        const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
+    if (std.mem.find(u8, trimmed, " lladdr ")) |lladdr_pos| {
+        const end = std.mem.findAny(u8, trimmed, " \t") orelse trimmed.len;
         const ip = ipStringToBytes(trimmed[0..end]) catch return null;
         if (ip[0] >= 224) return null;
 
         const rest = std.mem.trimStart(u8, trimmed[lladdr_pos + 8 ..], " \t");
-        const mac_end = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+        const mac_end = std.mem.findAny(u8, rest, " \t") orelse rest.len;
         const mac = parseMac(rest[0..mac_end]);
-        const is_reachable = std.mem.indexOf(u8, trimmed, "REACHABLE") != null or
-            std.mem.indexOf(u8, trimmed, "DELAY") != null;
+        const is_reachable = std.mem.find(u8, trimmed, "REACHABLE") != null or
+            std.mem.find(u8, trimmed, "DELAY") != null;
         return ArpEntry{ .ip = ip, .mac = mac, .is_reachable = is_reachable };
     }
 

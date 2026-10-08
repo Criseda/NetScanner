@@ -83,9 +83,9 @@ pub fn localeIsUtf8(lc_all: ?[]const u8, lc_ctype: ?[]const u8, lang: ?[]const u
     const locale = for ([_]?[]const u8{ lc_all, lc_ctype, lang }) |v| {
         if (v) |s| if (s.len > 0) break s;
     } else return false;
-    const dot = std.mem.indexOfScalar(u8, locale, '.') orelse return false;
+    const dot = std.mem.findScalar(u8, locale, '.') orelse return false;
     // Drop a trailing @modifier, as in `de_DE.UTF-8@euro`.
-    const codeset_end = std.mem.indexOfScalarPos(u8, locale, dot, '@') orelse locale.len;
+    const codeset_end = std.mem.findScalarPos(u8, locale, dot, '@') orelse locale.len;
     const codeset = locale[dot + 1 .. codeset_end];
     return std.ascii.eqlIgnoreCase(codeset, "UTF-8") or std.ascii.eqlIgnoreCase(codeset, "utf8");
 }

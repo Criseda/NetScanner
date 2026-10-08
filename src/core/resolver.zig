@@ -50,7 +50,7 @@ pub fn resolveHostName(allocator: std.mem.Allocator, ip: [4]u8) ?[]const u8 {
 pub fn cleanDomainName(raw: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0) return trimmed;
-    const dot = std.mem.indexOfScalar(u8, trimmed, '.');
+    const dot = std.mem.findScalar(u8, trimmed, '.');
     const clean_name = if (dot) |d| trimmed[0..d] else trimmed;
     return if (clean_name.len > 0) clean_name else trimmed;
 }
