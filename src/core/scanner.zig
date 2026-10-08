@@ -58,11 +58,10 @@ pub const ProbeOutcome = enum {
 /// This is the discovery verdict ("is anyone home?"): both open and
 /// refused prove a host is up, so Windows keeps the generous timeout
 /// to let slow RSTs arrive.
-/// Zig 0.16 implements no connect timeout itself: POSIX uses the
-/// hand-rolled non-blocking recipe below, while Windows goes through
-/// the Winsock helper in src/c/tcp_probe.c -- the blocking std.Io
-/// connect cannot tell refused apart from filtered there (every
-/// failure arrives as error.Unexpected) and has no timeout.
+/// std.Io's connect takes a `timeout` option, but Zig 0.17 leaves it
+/// unimplemented (it panics) on every OS, so the timeout is our own:
+/// POSIX uses the hand-rolled non-blocking recipe below, while Windows
+/// goes through the Winsock helper in src/c/tcp_probe.c.
 pub fn tcpConnect(ip: [4]u8, port: u16) ProbeOutcome {
     if (comptime builtin.os.tag == .windows) {
         return tcpConnectWinsock(ip, port, CONNECT_TIMEOUT_MS);
@@ -82,8 +81,6 @@ pub fn tcpConnectPort(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
 }
 
 /// Windows connect with our own timeout, via the C Winsock helper.
-/// The address is formatted on the stack: dotted IPv4 is at most 15
-/// characters plus the terminator.
 fn tcpConnectWinsock(ip: [4]u8, port: u16, timeout_ms: c_int) ProbeOutcome {
     var addr_buf: [16]u8 = undefined;
     const addr = utils.ipToCString(&addr_buf, ip);
