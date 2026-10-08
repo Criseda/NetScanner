@@ -91,12 +91,12 @@ pub fn install() void {
 /// console handler uses.
 pub fn exitInterrupted() noreturn {
     if (comptime builtin.os.tag == .windows) {
-        ExitProcess(@intFromEnum(windows.NTSTATUS.CONTROL_C_EXIT));
+        ExitProcess(@backingInt(windows.NTSTATUS.CONTROL_C_EXIT));
     } else {
         restoreDefaultSigint();
         std.posix.raise(.INT) catch {};
         // Only reached if the signal is blocked: still report it.
-        std.process.exit(128 + @as(u8, @intCast(@intFromEnum(std.posix.SIG.INT))));
+        std.process.exit(128 + @as(u8, @intCast(@backingInt(std.posix.SIG.INT))));
     }
 }
 

@@ -10,9 +10,9 @@ typedef enum {
 } tcp_probe_result;
 
 // Windows-only: connect to ip:port, waiting at most timeout_ms.
-// Zig 0.16 has no connect timeout of its own, and its blocking
-// connect cannot tell refused apart from filtered on Windows, so
-// this uses the classic non-blocking + select recipe directly.
+// Zig's std.Io connect leaves its timeout unimplemented (as of 0.17
+// it panics), so this uses the classic non-blocking + select recipe
+// directly.
 tcp_probe_result tcp_probe(const char *ip_address, unsigned short port,
                            int timeout_ms);
 

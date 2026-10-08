@@ -119,7 +119,7 @@ pub const OuiDatabase = struct {
         // Free any previously allocated custom entries before loading a new file.
         self.deinit();
 
-        const path_z = try self.allocator.dupeZ(u8, path);
+        const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
         const content = c_bindings.readFileContent(path_z.ptr) orelse return error.FileNotFound;
         defer c_bindings.freeFileContent(content);

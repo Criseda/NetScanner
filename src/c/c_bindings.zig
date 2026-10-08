@@ -91,8 +91,8 @@ pub const TcpProbe = enum(c_int) {
 /// helper. Anything unclassifiable counts as filtered.
 pub fn tcpProbe(ip: [*:0]const u8, port: u16, timeout_ms: c_int) TcpProbe {
     return switch (c.tcp_probe(ip, port, timeout_ms)) {
-        @intFromEnum(TcpProbe.open) => .open,
-        @intFromEnum(TcpProbe.refused) => .refused,
+        @backingInt(TcpProbe.open) => .open,
+        @backingInt(TcpProbe.refused) => .refused,
         else => .filtered,
     };
 }

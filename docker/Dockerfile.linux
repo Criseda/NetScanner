@@ -1,7 +1,7 @@
 # NetScanner Linux test image: Zig toolchain + network tools.
 # Lets anyone reproduce the Linux validation run (#28) without a
 # Linux box. macOS/Windows containers don't exist, so Linux-only.
-ARG ZIG_VERSION=0.16.0
+ARG ZIG_VERSION=0.17.0
 FROM ubuntu:24.04
 
 ARG ZIG_VERSION

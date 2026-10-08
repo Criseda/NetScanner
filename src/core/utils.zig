@@ -159,8 +159,17 @@ pub fn ipStringToBytes(ip_string: []const u8) !([4]u8) {
     return ip_bytes;
 }
 
-pub fn ipBytesToString(allocator: std.mem.Allocator, ip: [4]u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
+/// Dotted IPv4 ("192.168.0.1") in caller storage. The longest address,
+/// "255.255.255.255", is 15 characters and fits the buffer, so this
+/// cannot fail.
+pub fn formatIp(buf: *[15]u8, ip: [4]u8) []const u8 {
+    return std.mem.print(buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch unreachable;
+}
+
+/// formatIp as a C string for the C helpers: one more byte for the
+/// terminator.
+pub fn ipToCString(buf: *[16]u8, ip: [4]u8) [:0]const u8 {
+    return std.mem.printSentinel(buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }, 0) catch unreachable;
 }
 
 /// Split "1-1024" on the delimiter into port numbers.

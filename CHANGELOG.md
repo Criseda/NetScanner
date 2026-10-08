@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Building from source requires Zig 0.17.0 (was 0.16.0); 0.16.0 no
+  longer builds the project. Prebuilt binaries are unaffected. The
+  Docker test lab installs 0.17.0 too.
+
 ## v1.5.0
 
 Scans report their progress, to frontends and in the terminal:
