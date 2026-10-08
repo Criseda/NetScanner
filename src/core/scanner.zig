@@ -953,8 +953,9 @@ fn pingWave(
 /// One ping(1) command line that waits about 1s for a single reply,
 /// built in `buf`. Every OS spells that differently:
 /// - Windows: -n 1 -w 1000 (milliseconds), and no quiet flag.
-/// - Linux: -W 1 waits 1s for the reply (seconds; see the WARNING in
-///   src/c/ping.c).
+/// - Linux: -W 1 waits 1s for the reply. -W counts seconds here but
+///   milliseconds on macOS, so the two flag lists must not be merged:
+///   macOS's -W 1000 would make Linux wait ~17 minutes per dead host.
 /// - macOS: -W 1000 is in milliseconds, yet an unanswered ping still
 ///   took 2s there, so -t 1 caps the whole run at 1s.
 fn pingArgv(buf: *[9][]const u8, ip: []const u8) []const []const u8 {

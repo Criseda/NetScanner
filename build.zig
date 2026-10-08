@@ -163,10 +163,10 @@ fn buildExe(
     return b.addExecutable(.{ .name = "ns", .root_module = exe_module });
 }
 
-/// Everything compiled here also compiles ping.c and, on Windows, links
-/// the system libraries ICMP needs.
+/// Everything compiled here also compiles the C helpers and, on
+/// Windows, links the system libraries they call: iphlpapi for
+/// SendARP (resolver.c), ws2_32 for Winsock (resolver.c, tcp_probe.c).
 fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
-    mod.addCSourceFile(.{ .file = b.path("src/c/ping.c"), .flags = &[_][]const u8{"-Wall"} });
     mod.addCSourceFile(.{ .file = b.path("src/c/resolver.c"), .flags = &[_][]const u8{"-Wall"} });
     mod.addIncludePath(b.path("src/c"));
     mod.addIncludePath(b.path("."));

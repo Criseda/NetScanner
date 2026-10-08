@@ -1,10 +1,6 @@
-const builtin = @import("builtin");
-
 // Direct extern declaration without using @cImport
 pub const c = struct {
-    pub extern "c" fn ping_host(ip_address: [*:0]const u8) bool;
     pub extern "c" fn tcp_probe(ip_address: [*:0]const u8, port: u16, timeout_ms: c_int) c_int;
-    pub extern "c" fn ping_last_error() u32;
     pub extern "c" fn resolve_ptr(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize) c_int;
     pub extern "c" fn query_netbios(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
     pub extern "c" fn query_mdns(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
@@ -65,20 +61,6 @@ pub fn queryMdns(ip_null_terminated: [*:0]const u8, buf: []u8, timeout_ms: c_int
         return std.mem.sliceTo(buf, 0);
     }
     return null;
-}
-
-pub fn pingHost(ip: ?[*:0]const u8) bool {
-    if (ip == null) {
-        return false;
-    }
-    return c.ping_host(ip.?);
-}
-
-/// Winsock error of the most recent failed pingHost call (Windows
-/// only). Zero means no failure has been recorded yet.
-pub fn pingLastError() u32 {
-    if (comptime builtin.os.tag != .windows) return 0;
-    return c.ping_last_error();
 }
 
 pub const TcpProbe = enum(c_int) {
