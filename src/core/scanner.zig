@@ -302,9 +302,10 @@ pub const ScanOptions = struct {
 /// error.InvalidPortRange.
 ///
 /// A fixed pool of workers pulls ports from a shared atomic counter:
-/// no thread-per-port, no sleeps, no per-port stderr. Only open ports
-/// print, and only when options.stream_results is set; closed and
-/// filtered both mean "not open" and stay silent either way.
+/// no thread-per-port, no sleeps, no per-port stderr. A second pool
+/// then retries the ports a learned wait left unanswered. Only open
+/// ports print, and only when options.stream_results is set; closed
+/// and filtered both mean "not open" and stay silent either way.
 pub fn scanPorts(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -336,6 +337,10 @@ pub fn scanPorts(
     // it goes back to the caller (see u16LessThan below).
     var ports_mutex: std.Io.Mutex = .init;
     var next_port: std.atomic.Value(u32) = .init(start_port);
+    var retries: std.ArrayList(u16) = .empty;
+    defer retries.deinit(allocator);
+    var next_retry: std.atomic.Value(usize) = .init(0);
+    var half_units: std.atomic.Value(usize) = .init(0);
     const shares = PortShares{
         .run = run,
         .ip = ip_address,
@@ -344,21 +349,33 @@ pub fn scanPorts(
         .next_port = &next_port,
         .open_ports = &open_ports,
         .ports_mutex = &ports_mutex,
+        .retries = &retries,
+        .next_retry = &next_retry,
+        .half_units = &half_units,
     };
 
-    if (total == 1) {
-        // One port needs no pool: probe it on this thread instead of
-        // spawning a worker for a single connect.
-        portWorker(shares);
-        return open_ports;
-    }
+    // First every port gets one try; then the ports a learned wait
+    // left unanswered get their second (see probePort).
+    try runPortWorkers(allocator, total, portWorker, shares);
+    // No pool is running now, so the list is safe to read unguarded.
+    try runPortWorkers(allocator, retries.items.len, retryWorker, shares);
 
-    const worker_count: usize = @min(total, MAX_PORT_THREADS);
+    std.mem.sort(u16, open_ports.items, {}, u16LessThan);
+    return open_ports;
+}
+
+/// Run `worker` on up to MAX_PORT_THREADS threads, one per unit of
+/// `units`, and wait for all of them. Nothing to do for zero units,
+/// and one unit runs on this thread instead of spawning a worker for
+/// a single connect.
+fn runPortWorkers(allocator: std.mem.Allocator, units: usize, comptime worker: fn (PortShares) void, shares: PortShares) !void {
+    if (units == 0) return;
+    if (units == 1) return worker(shares);
+
+    const worker_count: usize = @min(units, MAX_PORT_THREADS);
     var threads: std.ArrayList(Thread) = .empty;
-    // Error path only: if a spawn fails halfway, wait for whatever
-    // started before returning the error. The success path joins
-    // explicitly below.
-    errdefer {
+    // Every return path, error or not, waits for whatever started.
+    defer {
         for (threads.items) |t| t.join();
         threads.deinit(allocator);
     }
@@ -366,17 +383,9 @@ pub fn scanPorts(
     // with an append error after workers already started.
     try threads.ensureTotalCapacity(allocator, worker_count);
     for (0..worker_count) |_| {
-        const t = try Thread.spawn(.{}, portWorker, .{shares});
+        const t = try Thread.spawn(.{}, worker, .{shares});
         threads.appendAssumeCapacity(t);
     }
-    // Success path: wait for every worker, release the handle list,
-    // sort what they found, and hand ownership to the caller. (The
-    // errdefers above only fire if we return an error.)
-    for (threads.items) |t| t.join();
-    threads.deinit(allocator);
-
-    std.mem.sort(u16, open_ports.items, {}, u16LessThan);
-    return open_ports;
 }
 
 fn u16LessThan(_: void, a: u16, b: u16) bool {
@@ -394,7 +403,23 @@ const PortShares = struct {
     timeout: PortTimeout,
     next_port: *std.atomic.Value(u32),
     open_ports: *std.ArrayList(u16),
+    /// Also guards `retries` while the first pass fills it.
     ports_mutex: *std.Io.Mutex,
+    /// Ports a learned wait left unanswered, for their second try.
+    retries: *std.ArrayList(u16),
+    next_retry: *std.atomic.Value(usize),
+    /// Progress in half ports: a port settled by its first try counts
+    /// two halves, a deferred one a half per try. So the `ports` phase
+    /// keeps one unit per port, and still climbs through the first
+    /// pass of a host whose ports nearly all wait for a second try.
+    half_units: *std.atomic.Value(usize),
+
+    /// Count `halves` more half ports, advancing progress by every
+    /// whole port they complete.
+    fn advanceHalves(self: PortShares, halves: usize) void {
+        const before = self.half_units.fetchAdd(halves, .monotonic);
+        for (before / 2..(before + halves) / 2) |_| self.run.advance();
+    }
 };
 
 /// One streamed port-scan hit, in text or JSON form, named from the
@@ -429,11 +454,47 @@ fn portWorker(shares: PortShares) void {
         const port_num = shares.next_port.fetchAdd(1, .monotonic);
         if (port_num > shares.end) break;
         const port: u16 = @intCast(port_num);
-        if (probePort(shares, port) == .open) {
-            recordOpenPort(shares, port);
+        switch (probePort(shares, port)) {
+            .open => recordOpenPort(shares, port),
+            .not_open => {},
+            .retry_later => if (deferRetry(shares, port)) {
+                shares.advanceHalves(1);
+                continue;
+            } else {
+                // No room to defer it: the second try happens now.
+                secondTry(shares, port);
+            },
         }
-        shares.run.advance();
+        shares.advanceHalves(2);
     }
+}
+
+/// Second pass: each port the first pass deferred gets one more try.
+fn retryWorker(shares: PortShares) void {
+    while (!shares.run.stopRequested()) {
+        const index = shares.next_retry.fetchAdd(1, .monotonic);
+        if (index >= shares.retries.items.len) break;
+        secondTry(shares, shares.retries.items[index]);
+        shares.advanceHalves(1);
+    }
+}
+
+/// A deferred port's second try, with the wait learned by then.
+fn secondTry(shares: PortShares, port: u16) void {
+    const learned = shares.timeout.learned;
+    const io = shares.run.io;
+    if (learned.probe(io, shares.ip, port, learned.current(io)) == .open) {
+        recordOpenPort(shares, port);
+    }
+}
+
+/// Queue `port` for the second pass. False if the list cannot grow.
+fn deferRetry(shares: PortShares, port: u16) bool {
+    const io = shares.run.io;
+    shares.ports_mutex.lockUncancelable(io);
+    defer shares.ports_mutex.unlock(io);
+    shares.retries.append(shares.run.allocator, port) catch return false;
+    return true;
 }
 
 /// How long a port-scan probe waits for an answer.
@@ -444,24 +505,31 @@ const PortTimeout = union(enum) {
     learned: *LearnedTimeout,
 };
 
-/// Probe one port with the scan's timeout. A learned wait is used only
-/// when two tries of it fit in PORT_TIMEOUT_MS, and an unanswered first
-/// try gets the second, so one lost SYN cannot hide an open port. (The
-/// OS retransmits a SYN only after a second or more, well past either
-/// wait, so the single full wait never had a second try.) Otherwise,
-/// on a slow link, the probe waits the full PORT_TIMEOUT_MS once, as a
-/// fixed timeout did. Either way no port costs more than it used to.
-fn probePort(shares: PortShares, port: u16) ProbeOutcome {
-    const learned = switch (shares.timeout) {
-        .fixed => |ms| return tcpConnectPort(shares.ip, port, ms),
-        .learned => |l| l,
+/// What a port's first try decided.
+const FirstTry = enum { open, not_open, retry_later };
+
+/// Give one port its first try with the scan's timeout. A learned wait
+/// is used only when two tries of it fit in PORT_TIMEOUT_MS, and an
+/// unanswered first try earns a second, so one lost SYN cannot hide an
+/// open port. (The OS retransmits a SYN only after a second or more,
+/// well past either wait, so the single full wait never had a second
+/// try.) The second try waits for the end of the scan: right away, a
+/// host that stalls for a moment would miss both. Otherwise, on a slow
+/// link, the probe waits the full PORT_TIMEOUT_MS once, as a fixed
+/// timeout did. Either way no port costs more than it used to.
+fn probePort(shares: PortShares, port: u16) FirstTry {
+    const outcome = switch (shares.timeout) {
+        .fixed => |ms| tcpConnectPort(shares.ip, port, ms),
+        .learned => |learned| learned: {
+            const io = shares.run.io;
+            const timeout_ms = learned.current(io);
+            if (2 * timeout_ms > PORT_TIMEOUT_MS) break :learned learned.probe(io, shares.ip, port, PORT_TIMEOUT_MS);
+            const first = learned.probe(io, shares.ip, port, timeout_ms);
+            if (first == .filtered) return .retry_later;
+            break :learned first;
+        },
     };
-    const io = shares.run.io;
-    const timeout_ms = learned.current(io);
-    if (2 * timeout_ms > PORT_TIMEOUT_MS) return learned.probe(io, shares.ip, port, PORT_TIMEOUT_MS);
-    const first = learned.probe(io, shares.ip, port, timeout_ms);
-    if (first != .filtered) return first;
-    return learned.probe(io, shares.ip, port, learned.current(io));
+    return if (outcome == .open) .open else .not_open;
 }
 
 /// A port scan's timeout, learned from the round trips of the probes

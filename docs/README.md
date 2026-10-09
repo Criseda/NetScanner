@@ -87,7 +87,8 @@ Each connect attempt waits as long as the host's own answers suggest:
 silently drops closed ports costs a fraction of a fixed wait. Until the
 first answer, and for a host that never answers, the wait is 500 ms.
 The learned wait is used only when two tries of it fit in 500 ms, and
-an unanswered port gets the second try, so one lost packet cannot hide
+an unanswered port gets the second try near the end of the scan, so
+neither one lost packet nor a host that stalls for a moment can hide
 it; on slower links each port waits 500 ms once, as before. No port
 waits longer than it did with the fixed timeout.
 `--timeout <ms>` fixes the wait for every attempt instead, with no
