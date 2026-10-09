@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Port scans (`ns -p`) learn their connect timeout from the host's own
+  answers instead of always waiting 500 ms per port: TCP's
+  retransmission formula (RFC 6298) over the ports that answered,
+  between 100 and 500 ms. An unanswered port gets a second try, so one
+  lost packet cannot hide it. The learned wait is used only when both
+  tries fit in 500 ms, so no port waits longer than before. Measured on
+  Windows 11 against LAN hosts that drop closed ports: a full
+  `1-65535` scan of a router 131.0s -> 63.8s (median of 10), and
+  `1-10000` on a NAS 20.1s -> 8.7s, with the same open ports found.
+  `--timeout <ms>` still fixes the wait, exactly as before.
+
 - On Windows, a refused connection is now reported the moment the host
   answers, instead of about 2s later: Windows retried every refused
   connect before giving up, and `ns` now turns those retries off.

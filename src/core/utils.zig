@@ -37,7 +37,7 @@ pub fn printUsage(io: std.Io) !void {
         \\  --ping                      Use ICMP ping sweep instead of TCP + ARP
         \\
         \\PORT OPTIONS (-p):
-        \\  --timeout <ms>              Probe connection timeout in milliseconds (default: 500)
+        \\  --timeout <ms>              Fixed probe timeout in ms (default: learned, 100-500)
         \\
         \\OUTPUT OPTIONS (-s, -p):
         \\  --json                      One JSON object per line, for scripts and apps

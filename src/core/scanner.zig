@@ -15,6 +15,7 @@ const oui = @import("oui.zig");
 const ports = @import("ports.zig");
 const resolver = @import("resolver.zig");
 const progress = @import("progress.zig");
+const rtt = @import("rtt.zig");
 
 /// How many port-scan workers run at once. One fixed worker per
 /// thread, each pulling the next port from a shared counter, so a
@@ -34,12 +35,23 @@ const MAX_TCP_THREADS = 128;
 /// about 2s before reporting it. src/c/tcp_probe.c now turns those
 /// retries off, so refusals arrive in milliseconds on every OS.
 const CONNECT_TIMEOUT_MS: c_int = 500;
-/// Cap for one port-scan connect attempt, in milliseconds. An open
-/// port answers quickly on a LAN, and closed-vs-filtered both mean
-/// "not open" and stay silent, so a short wait only costs accuracy
-/// against unusually slow hosts -- never against the common case. Do
-/// not raise it without remeasuring large filtered ranges.
-const PORT_TIMEOUT_MS: c_int = 500;
+/// Cap for one port-scan connect attempt, in milliseconds: where the
+/// learned timeout starts, and the most it can grow to. An open port
+/// answers quickly on a LAN, and closed-vs-filtered both mean "not
+/// open" and stay silent, so a short wait only costs accuracy against
+/// unusually slow hosts -- never against the common case. Do not raise
+/// it without remeasuring large filtered ranges.
+const PORT_TIMEOUT_MS: u32 = 500;
+/// The least a learned port-scan timeout waits, in milliseconds. LAN
+/// hosts answer in a few milliseconds, and in about 20 even under a
+/// full scan's load, so this leaves ample headroom; it is also nmap's
+/// default minimum (--min-rtt-timeout).
+const PORT_TIMEOUT_FLOOR_MS: u32 = 100;
+comptime {
+    // probePort retries a learned wait only when two tries fit in one
+    // full wait, so the floor must leave room for that.
+    std.debug.assert(2 * PORT_TIMEOUT_FLOOR_MS <= PORT_TIMEOUT_MS);
+}
 
 // ---------------------------------------------------------------------------
 // TCP connecting with a timeout. Shared by port scanning ("is this port
@@ -265,10 +277,10 @@ pub const ScanOptions = struct {
     /// under `zig build test` speak the build protocol over stdout, and
     /// stray writes hang the runner.
     stream_results: bool = true,
-    /// Per-probe wait cap in milliseconds. Null selects
-    /// PORT_TIMEOUT_MS. Exposed as `ns -p ... --timeout <ms>` for
-    /// unusually slow networks; lower it on a fast LAN for even
-    /// quicker sweeps.
+    /// Per-probe wait cap in milliseconds, fixed for the whole scan.
+    /// Null learns it from the host's own answers instead (see
+    /// LearnedTimeout). Exposed as `ns -p ... --timeout <ms>` for
+    /// unusually slow networks, or to pin the wait exactly.
     timeout_ms: ?u16 = null,
     /// Stream `{"type":"port",...}` lines instead of "Open port: N (name)",
     /// plus `progress` events (phase `ports`), when stream_results is on.
@@ -303,9 +315,10 @@ pub fn scanPorts(
 ) !std.ArrayList(u16) {
     if (start_port > end_port) return error.InvalidPortRange;
 
-    // One wait cap for every probe in this scan: the explicit
-    // override when given, PORT_TIMEOUT_MS otherwise.
-    const timeout_ms: c_int = if (options.timeout_ms) |t| t else PORT_TIMEOUT_MS;
+    // The explicit override waits the same for every probe. Otherwise
+    // the wait is learned from this host's answers as the scan goes.
+    var learned: LearnedTimeout = .{ .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_MS) };
+    const timeout: PortTimeout = if (options.timeout_ms) |t| .{ .fixed = t } else .{ .learned = &learned };
     const total: usize = @as(usize, end_port) - start_port + 1;
 
     var stdout_mutex: std.Io.Mutex = .init;
@@ -327,7 +340,7 @@ pub fn scanPorts(
         .run = run,
         .ip = ip_address,
         .end = end_port,
-        .timeout_ms = timeout_ms,
+        .timeout = timeout,
         .next_port = &next_port,
         .open_ports = &open_ports,
         .ports_mutex = &ports_mutex,
@@ -378,7 +391,7 @@ const PortShares = struct {
     run: Run,
     ip: [4]u8,
     end: u32,
-    timeout_ms: c_int,
+    timeout: PortTimeout,
     next_port: *std.atomic.Value(u32),
     open_ports: *std.ArrayList(u16),
     ports_mutex: *std.Io.Mutex,
@@ -416,12 +429,74 @@ fn portWorker(shares: PortShares) void {
         const port_num = shares.next_port.fetchAdd(1, .monotonic);
         if (port_num > shares.end) break;
         const port: u16 = @intCast(port_num);
-        if (tcpConnectPort(shares.ip, port, shares.timeout_ms) == .open) {
+        if (probePort(shares, port) == .open) {
             recordOpenPort(shares, port);
         }
         shares.run.advance();
     }
 }
+
+/// How long a port-scan probe waits for an answer.
+const PortTimeout = union(enum) {
+    /// The same for every probe (`--timeout`).
+    fixed: u16,
+    /// Learned from the host's answers so far.
+    learned: *LearnedTimeout,
+};
+
+/// Probe one port with the scan's timeout. A learned wait is used only
+/// when two tries of it fit in PORT_TIMEOUT_MS, and an unanswered first
+/// try gets the second, so one lost SYN cannot hide an open port. (The
+/// OS retransmits a SYN only after a second or more, well past either
+/// wait, so the single full wait never had a second try.) Otherwise,
+/// on a slow link, the probe waits the full PORT_TIMEOUT_MS once, as a
+/// fixed timeout did. Either way no port costs more than it used to.
+fn probePort(shares: PortShares, port: u16) ProbeOutcome {
+    const learned = switch (shares.timeout) {
+        .fixed => |ms| return tcpConnectPort(shares.ip, port, ms),
+        .learned => |l| l,
+    };
+    const io = shares.run.io;
+    const timeout_ms = learned.current(io);
+    if (2 * timeout_ms > PORT_TIMEOUT_MS) return learned.probe(io, shares.ip, port, PORT_TIMEOUT_MS);
+    const first = learned.probe(io, shares.ip, port, timeout_ms);
+    if (first != .filtered) return first;
+    return learned.probe(io, shares.ip, port, learned.current(io));
+}
+
+/// A port scan's timeout, learned from the round trips of the probes
+/// the host answered: a LAN host's open ports answer in milliseconds,
+/// so a scan of a host that drops closed ports stops waiting the full
+/// PORT_TIMEOUT_MS on each of them. One per scan, shared by every
+/// worker (the host is the same for all of them).
+const LearnedTimeout = struct {
+    estimator: rtt.RttEstimator,
+    mutex: std.Io.Mutex = .init,
+
+    /// One connect that waits at most timeout_ms. An answer, open or
+    /// refused, teaches its round trip to the probes that follow.
+    fn probe(self: *LearnedTimeout, io: std.Io, ip: [4]u8, port: u16, timeout_ms: u32) ProbeOutcome {
+        const started = std.Io.Clock.now(.awake, io);
+        const outcome = tcpConnectPort(ip, port, @intCast(timeout_ms));
+        if (outcome != .filtered) {
+            const elapsed_ns = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
+            self.observe(io, @intCast(@max(0, @divTrunc(elapsed_ns, std.time.ns_per_us))));
+        }
+        return outcome;
+    }
+
+    fn current(self: *LearnedTimeout, io: std.Io) u32 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.estimator.timeoutMs();
+    }
+
+    fn observe(self: *LearnedTimeout, io: std.Io, rtt_us: u64) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.estimator.observe(rtt_us);
+    }
+};
 
 fn recordOpenPort(shares: PortShares, port: u16) void {
     const run = shares.run;

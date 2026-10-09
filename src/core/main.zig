@@ -93,8 +93,9 @@ fn fail(io: std.Io, json: bool, comptime fmt: []const u8, args: anytype) noretur
 }
 
 /// `ns -p <ip> <port-range> [--timeout <ms>] [--json]`: scan one host
-/// for open ports. The timeout caps each probe (default 500ms); raise it
-/// on slow networks, lower it on fast LANs for quicker sweeps.
+/// for open ports. Without --timeout, each probe waits as long as the
+/// host's answers so far suggest (100-500ms); --timeout fixes the wait
+/// instead, for networks slower than that or to pin it exactly.
 fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, args: []const [:0]const u8, json: bool) !void {
     if (args.len < 4) {
         if (json) fail(io, json, "Usage: ns -p <ip> <port-range>", .{});
