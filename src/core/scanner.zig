@@ -47,6 +47,16 @@ const PORT_TIMEOUT_MS: u32 = 500;
 /// full scan's load, so this leaves ample headroom; it is also nmap's
 /// default minimum (--min-rtt-timeout).
 const PORT_TIMEOUT_FLOOR_MS: u32 = 100;
+/// The least a learned port-scan timeout waits beyond the host's
+/// smoothed round trip, in milliseconds (see RttEstimator.headroom_ms).
+/// A distant host refusing closed ports answers in a tight band (about
+/// 165-195ms for scanme.nmap.org in #71's measurements), and with no
+/// more room than the band's own variation, 5-30% of the refusals
+/// missed the wait and paid a second try that found nothing. 40ms
+/// clears that band, and still lets two tries fit in PORT_TIMEOUT_MS
+/// up to a 210ms round trip. Below a 60ms srtt the headroom cannot
+/// lift the wait past the floor, so LAN scans are untouched.
+const PORT_TIMEOUT_HEADROOM_MS: u32 = 40;
 comptime {
     // probePort retries a learned wait only when two tries fit in one
     // full wait, so the floor must leave room for that.
@@ -318,7 +328,7 @@ pub fn scanPorts(
 
     // The explicit override waits the same for every probe. Otherwise
     // the wait is learned from this host's answers as the scan goes.
-    var learned: LearnedTimeout = .{ .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_MS) };
+    var learned: LearnedTimeout = .{ .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_HEADROOM_MS, PORT_TIMEOUT_MS) };
     const timeout: PortTimeout = if (options.timeout_ms) |t| .{ .fixed = t } else .{ .learned = &learned };
     const total: usize = @as(usize, end_port) - start_port + 1;
 
