@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- On Windows, a refused connection is now reported the moment the host
+  answers, instead of about 2s later: Windows retried every refused
+  connect before giving up, and `ns` now turns those retries off.
+  Discovery (`ns -s`) therefore waits 500 ms per probe on Windows too,
+  as on Linux and macOS (was 3000 ms), and port scans see closed ports
+  at once. Measured on Windows 11, home network (median of 10 / 5 / 3
+  runs, same hosts and ports found): `ns -s` on a /24 6.9s -> 1.8s, on
+  an empty /24 6.2s -> 1.2s, and `ns -p` 1-10000 on a NAS that refuses
+  closed ports 19.9s -> 0.7s. Hosts that drop probes instead of refusing
+  them scan as before. A probe that gets no answer still waits the
+  full timeout, but sends its connection request only once: with
+  `--timeout` above 1000, Windows no longer resends it after 1s.
+
 - Building from source requires Zig 0.17.0 (was 0.16.0); 0.16.0 no
   longer builds the project. Prebuilt binaries are unaffected. The
   Docker test lab installs 0.17.0 too.

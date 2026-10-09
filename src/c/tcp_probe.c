@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <WS2tcpip.h>
+#include <mstcpip.h>
 
 // Map a finished connection attempt to a verdict. Only an actively
 // refused connection proves "closed but present"; every other error
@@ -20,6 +21,26 @@ static tcp_probe_result classify(int so_error) {
   default:
     return TCP_PROBE_FILTERED;
   }
+}
+
+// Make a refusal surface the moment its RST arrives. By default Windows
+// treats a RST to its SYN as a reason to try again, retransmitting the
+// SYN twice before reporting "refused" -- about 2s later, every time,
+// which made every closed port and every refusing host cost a full
+// timeout. Turning SYN retransmissions off reports the RST at once
+// (measured ~0.5ms on a LAN, was ~2020ms).
+// With no retransmissions, a silent target fails after one initial RTO
+// (WSAETIMEDOUT) instead of after our select() deadline, so the RTO is
+// set to that deadline: the single SYN waits exactly as long as the
+// caller asked, no shorter. Best effort: if Windows rejects the option,
+// the probe still works, only slower to see refusals.
+static void refuse_fast(SOCKET sock, int timeout_ms) {
+  TCP_INITIAL_RTO_PARAMETERS params;
+  params.Rtt = (USHORT)(timeout_ms > 0xFFFE ? 0xFFFE : timeout_ms);
+  params.MaxSynRetransmissions = TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS;
+  DWORD returned = 0;
+  WSAIoctl(sock, SIO_TCP_INITIAL_RTO, &params, sizeof(params), NULL, 0,
+           &returned, NULL, NULL);
 }
 
 tcp_probe_result tcp_probe(const char *ip_address, unsigned short port,
@@ -37,6 +58,7 @@ tcp_probe_result tcp_probe(const char *ip_address, unsigned short port,
     closesocket(sock);
     return TCP_PROBE_FILTERED;
   }
+  refuse_fast(sock, timeout_ms);
 
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));

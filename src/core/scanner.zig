@@ -30,16 +30,15 @@ const MAX_PORT_THREADS = if (builtin.os.tag == .macos) 128 else 256;
 const MAX_TCP_THREADS = 128;
 /// Cap for one discovery connect attempt, in milliseconds. Bounds
 /// discovery probes, so filtered hosts cost little.
-/// Windows gets the larger bound: refusals there can arrive seconds
-/// late behind filtering middleboxes, while clean hosts still resolve
-/// in milliseconds through the early signal.
-const CONNECT_TIMEOUT_MS: c_int = if (builtin.os.tag == .windows) 3000 else 500;
-/// Cap for one port-scan connect attempt, in milliseconds. Shorter
-/// than discovery on Windows on purpose: an open port answers quickly
-/// on a LAN, and closed-vs-filtered both mean "not open" and stay
-/// silent, so the shorter wait only costs accuracy against unusually
-/// slow hosts -- never against the common case. Do not raise this to
-/// the discovery bound without remeasuring large filtered ranges.
+/// Windows used to need 3000 here: it retried a refused connect for
+/// about 2s before reporting it. src/c/tcp_probe.c now turns those
+/// retries off, so refusals arrive in milliseconds on every OS.
+const CONNECT_TIMEOUT_MS: c_int = 500;
+/// Cap for one port-scan connect attempt, in milliseconds. An open
+/// port answers quickly on a LAN, and closed-vs-filtered both mean
+/// "not open" and stay silent, so a short wait only costs accuracy
+/// against unusually slow hosts -- never against the common case. Do
+/// not raise it without remeasuring large filtered ranges.
 const PORT_TIMEOUT_MS: c_int = 500;
 
 // ---------------------------------------------------------------------------
@@ -56,8 +55,7 @@ pub const ProbeOutcome = enum {
 
 /// Connect to ip:port, waiting at most CONNECT_TIMEOUT_MS.
 /// This is the discovery verdict ("is anyone home?"): both open and
-/// refused prove a host is up, so Windows keeps the generous timeout
-/// to let slow RSTs arrive.
+/// refused prove a host is up.
 /// std.Io's connect takes a `timeout` option, but Zig 0.17 leaves it
 /// unimplemented (it panics) on every OS, so the timeout is our own:
 /// POSIX uses the hand-rolled non-blocking recipe below, while Windows
