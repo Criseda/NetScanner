@@ -11,6 +11,9 @@
   refused ports retried per run before, none after (the one port
   dropped on the way still is, as it should be). Same open ports;
   LAN scans are unchanged, as the 100 ms floor already left more room.
+  A retried port's two tries now also share the 500 ms between them,
+  even if the host slowed down in between (the second could wait the
+  full 500 ms before).
 
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's
