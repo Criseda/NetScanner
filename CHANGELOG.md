@@ -9,8 +9,8 @@
   lost packet cannot hide it. The learned wait is used only when both
   tries fit in 500 ms, so no port waits longer than before. Measured on
   Windows 11 against LAN hosts that drop closed ports: a full
-  `1-65535` scan of a router 131.0s -> 63.8s (median of 10), and
-  `1-10000` on a NAS 20.1s -> 8.7s, with the same open ports found.
+  `1-65535` scan of a router 130.2s -> 55.4s (median of 10), and
+  `1-10000` on a NAS 19.9s -> 8.6s, with the same open ports found.
   `--timeout <ms>` still fixes the wait, exactly as before.
 
 - On Windows, a refused connection is now reported the moment the host
