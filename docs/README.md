@@ -81,7 +81,19 @@ lookups. It has two sources, kept apart:
   ports IANA leaves unassigned or assigns to something else. Without an
   overlay entry, `SERVICE` is the IANA name.
 
-`--timeout <ms>` caps each connect attempt (default 500).
+Each connect attempt waits as long as the host's own answers suggest:
+`ns` times the ports that answer and waits a little longer than that
+(TCP's retransmission formula, between 100 and 500 ms), so a host that
+silently drops closed ports costs a fraction of a fixed wait. Until the
+first answer, and for a host that never answers, the wait is 500 ms.
+The learned wait is used only when two tries of it fit in 500 ms, and
+an unanswered port gets the second try near the end of the scan, so
+neither one lost packet nor a host that stalls for a moment can hide
+it; on slower links each port waits 500 ms once, as before. No port
+waits longer than it did with the fixed timeout.
+`--timeout <ms>` fixes the wait for every attempt instead, with no
+second try: use it for links slower than 500 ms, or to get exactly
+the behavior of earlier versions (`--timeout 500`).
 
 ### Status line and Ctrl+C
 
