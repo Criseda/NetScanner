@@ -3,10 +3,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-// One sweep sends at most this many echoes per millisecond (16,000 a
-// second): a /24 goes out in about 16 ms, yet never as one burst that
-// a busy Wi-Fi link or a small router queue could drop part of (#37).
-#define SENDS_PER_MS 16
+// One sweep sends at most this many echoes per millisecond (2,000 a
+// second): a /24 goes out in about 128 ms, never as one burst that a
+// busy Wi-Fi link or a small router queue could drop part of (#37).
+// Most echoes in a sweep go to empty addresses, and each of those
+// first makes the OS broadcast an ARP request, which Wi-Fi sends at
+// its slowest rate. At 16 a millisecond, a Wi-Fi /23 on macOS lost
+// up to half its replies, the gateway's included (2 runs of 5 found
+// 21 and 27 hosts of 40); at 2 it finds what ping(1) did. Large
+// ranges barely notice: MAX_PINGS_IN_FLIGHT with a 1s wait already
+// holds a sweep to about 500 echoes a second once it is under way.
+#define SENDS_PER_MS 2
 
 // Echo payload: a per-sweep token, so stray replies (another program's
 // pings, or an earlier sweep's late ones) never count, and the host's

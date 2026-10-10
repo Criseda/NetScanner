@@ -10,7 +10,10 @@
   Measured on Windows 11 (median, same machine, old and new builds
   interleaved): `--ping` on a home /24 2.5s -> 1.0s, on an empty routed
   /20 46.5s -> 8.0s, on an empty routed /16 710s -> 128s. The default
-  `ns -s` is unchanged (2.0s). On Linux, an on-link /20 sweeps in 13.5s
+  `ns -s` is unchanged (2.0s). On macOS (Wi-Fi): `--ping` on a /23
+  2.3s -> 1.1-1.3s, on an empty routed /20 18.2s -> 8.2s, with the
+  same hosts found. Pings go out at most 2 per millisecond: at 16, a
+  Wi-Fi /23 lost up to half its replies. On Linux, an on-link /20 sweeps in 13.5s
   instead of about 20s. Where Linux does not allow unprivileged pings
   (the user's group is outside `net.ipv4.ping_group_range`), `ns` falls
   back to the `ping` command, as before.
