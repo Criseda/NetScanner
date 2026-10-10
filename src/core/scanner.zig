@@ -29,12 +29,19 @@ const MAX_PORT_THREADS = if (builtin.os.tag == .macos) 128 else 256;
 /// How many discovery workers run at once (same pool pattern: one
 /// thread per worker, each pulling the next IP from a shared index).
 const MAX_TCP_THREADS = 128;
-/// Cap for one discovery connect attempt, in milliseconds. Bounds
-/// discovery probes, so filtered hosts cost little.
+/// Cap for one discovery connect attempt, in milliseconds: where the
+/// sweep's learned timeout starts, and the most it can grow to.
+/// Bounds discovery probes, so filtered hosts cost little.
 /// Windows used to need 3000 here: it retried a refused connect for
 /// about 2s before reporting it. src/c/tcp_probe.c now turns those
 /// retries off, so refusals arrive in milliseconds on every OS.
-const CONNECT_TIMEOUT_MS: c_int = 500;
+const CONNECT_TIMEOUT_MS: u32 = 500;
+/// The least a learned discovery wait can be, in milliseconds: the
+/// same as a port scan's. A Wi-Fi device in power save can take longer
+/// than this to answer TCP, but the probe still makes the OS resolve
+/// its MAC, and the ARP pass after the sweep then pings it with a
+/// longer wait of its own (see harvestArp).
+const CONNECT_TIMEOUT_FLOOR_MS: u32 = 100;
 /// Cap for one port-scan connect attempt, in milliseconds: where the
 /// learned timeout starts, and the most it can grow to. An open port
 /// answers quickly on a LAN, and closed-vs-filtered both mean "not
@@ -51,6 +58,8 @@ comptime {
     // probePort retries a learned wait only when two tries fit in one
     // full wait, so the floor must leave room for that.
     std.debug.assert(2 * PORT_TIMEOUT_FLOOR_MS <= PORT_TIMEOUT_MS);
+    // The same goes for a discovery sweep (sweepProbe).
+    std.debug.assert(2 * CONNECT_TIMEOUT_FLOOR_MS <= CONNECT_TIMEOUT_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -74,9 +83,9 @@ pub const ProbeOutcome = enum {
 /// goes through the Winsock helper in src/c/tcp_probe.c.
 pub fn tcpConnect(ip: [4]u8, port: u16) ProbeOutcome {
     if (comptime builtin.os.tag == .windows) {
-        return tcpConnectWinsock(ip, port, CONNECT_TIMEOUT_MS);
+        return tcpConnectWinsock(ip, port, @intCast(CONNECT_TIMEOUT_MS));
     }
-    return tcpConnectTimeout(ip, port, CONNECT_TIMEOUT_MS);
+    return tcpConnectTimeout(ip, port, @intCast(CONNECT_TIMEOUT_MS));
 }
 
 /// Connect to ip:port, waiting at most timeout_ms. This is the
@@ -536,7 +545,8 @@ fn probePort(shares: PortShares, port: u16) FirstTry {
 /// the host answered: a LAN host's open ports answer in milliseconds,
 /// so a scan of a host that drops closed ports stops waiting the full
 /// PORT_TIMEOUT_MS on each of them. One per scan, shared by every
-/// worker (the host is the same for all of them).
+/// worker (the host is the same for all of them). A discovery sweep
+/// keeps one too, learned from the hosts that answer (sweepHosts).
 const LearnedTimeout = struct {
     estimator: rtt.RttEstimator,
     mutex: std.Io.Mutex = .init,
@@ -665,31 +675,37 @@ fn printHost(io: std.Io, stdout_mutex: *std.Io.Mutex, ip: [4]u8, comptime source
 /// Run the TCP probe once per IP in the list and wait for every
 /// worker before returning. A fixed pool pulls indexes from a shared
 /// atomic counter, so a /16 needs only MAX_TCP_THREADS threads
-/// instead of one per IP. Every probed IP counts toward the current
-/// phase, answered or not. A stop request keeps the pool from taking
-/// new IPs.
+/// instead of one per IP. The wait is learned from the hosts that
+/// answer (see sweepProbe): one estimator for the whole sweep, since
+/// every target sits on the same network. Every probed IP counts
+/// toward the current phase, answered or not. A stop request keeps
+/// the pool from taking new IPs.
 fn sweepHosts(shares: Discovery, ips: []const [4]u8) void {
     if (ips.len == 0) return;
     const allocator = shares.run.allocator;
     const worker_count: usize = @min(ips.len, MAX_TCP_THREADS);
 
+    var learned: LearnedTimeout = .{ .estimator = .init(CONNECT_TIMEOUT_FLOOR_MS, CONNECT_TIMEOUT_MS) };
     var next: std.atomic.Value(usize) = .init(0);
     const SweepShares = struct {
         base: Discovery,
         ips: []const [4]u8,
         next: *std.atomic.Value(usize),
+        learned: *LearnedTimeout,
     };
     const sweep = SweepShares{
         .base = shares,
         .ips = ips,
         .next = &next,
+        .learned = &learned,
     };
     const sweepWorker = struct {
         fn run(s: SweepShares) void {
             while (!s.base.run.stopRequested()) {
                 const i = s.next.fetchAdd(1, .monotonic);
                 if (i >= s.ips.len) break;
-                tcpWorker(s.base, s.ips[i]);
+                const ip = s.ips[i];
+                if (sweepProbe(s.base.run.io, s.learned, ip)) s.base.reportHost(ip, .tcp);
                 s.base.run.advance();
             }
         }
@@ -712,6 +728,35 @@ fn sweepHosts(shares: Discovery, ips: []const [4]u8) void {
             break;
         };
     }
+}
+
+/// Whether a host answers at `ip` on TCP_PROBE_PORT: connected and
+/// refused both prove it is there; only silence means "no answer".
+///
+/// The wait follows a port scan's rule (probePort): a learned wait
+/// only when two tries of it fit in CONNECT_TIMEOUT_MS, and then an
+/// unanswered first try gets a second, so one lost SYN cannot hide a
+/// host; otherwise one full wait, as before. Until the first host
+/// answers, the estimator says CONNECT_TIMEOUT_MS, so a range where
+/// nothing answers sweeps exactly as with a fixed wait.
+///
+/// Unlike a port scan, the second try follows right away. Each IP is
+/// a host of its own, probed on one port, so there is no host-wide
+/// stall to wait out; and a sweep is only a few waits long, so a
+/// pass of retries at the end would add a whole wait to it (measured
+/// on a Wi-Fi /23, where the few IPs probed before the wait settled
+/// made the sweep slower than a fixed wait).
+fn sweepProbe(io: std.Io, learned: *LearnedTimeout, ip: [4]u8) bool {
+    const first_ms = learned.current(io);
+    if (2 * first_ms > CONNECT_TIMEOUT_MS) {
+        return learned.probe(io, ip, TCP_PROBE_PORT, CONNECT_TIMEOUT_MS) != .filtered;
+    }
+    if (learned.probe(io, ip, TCP_PROBE_PORT, first_ms) != .filtered) return true;
+    // The wait learned by now, but no more than the first try left of
+    // CONNECT_TIMEOUT_MS: both tries together wait no longer than one
+    // fixed timeout would have.
+    const second_ms = @min(learned.current(io), CONNECT_TIMEOUT_MS - first_ms);
+    return learned.probe(io, ip, TCP_PROBE_PORT, second_ms) != .filtered;
 }
 
 /// The end of both subnet scans, once discovery is done: details (MAC,
@@ -1235,20 +1280,6 @@ pub fn scanNetwork(
     harvestArp(discovery, hosts.start, hosts.end);
 
     reportResults(discovery, options, started);
-}
-
-fn tcpWorker(shares: Discovery, ip: [4]u8) void {
-    if (tcpProbe(ip)) shares.reportHost(ip, .tcp);
-}
-
-/// Returns true when the host answers on the probe port or actively
-/// refuses the connection. Both prove a host is there; only a timeout
-/// (or unreachable network) means "no answer".
-fn tcpProbe(ip: [4]u8) bool {
-    return switch (tcpConnect(ip, TCP_PROBE_PORT)) {
-        .open, .refused => true,
-        .filtered => false,
-    };
 }
 
 /// Read the local ARP table for in-range hosts the TCP sweep missed,

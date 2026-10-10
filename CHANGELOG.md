@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Discovery (`ns -s`) learns its connect timeout the way port scans
+  do: from how fast the subnet's hosts answer, between 100 and 500 ms,
+  instead of always waiting 500 ms per address. An address that stays
+  silent through a learned wait gets a second try right away, and the
+  two tries together never wait longer than 500 ms, so a single lost
+  packet cannot hide a host and no address costs more than before.
+  Measured on Windows 11 (median of interleaved runs, same hosts found
+  per run): a wired /24 2.0s -> 1.5s, a /22 with one live /24 5.0s ->
+  3.0s, a Wi-Fi /23 4.0s -> 3.5s. A range where nothing answers has
+  nothing to learn from and sweeps as before (an unused /20: 16.4s
+  either way).
+
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's
   retransmission formula (RFC 6298) over the ports that answered,

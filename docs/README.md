@@ -55,6 +55,14 @@ IP               HOSTNAME                  MAC                MANUFACTURER
 
 When run without resolution flags, `ns -s` outputs the classic compact numerical list followed by the host count and elapsed time.
 
+The TCP probes learn their wait the way port scans do (see
+[Port scans](#port-scans-ns--p)): from how fast the subnet's hosts
+answer, between 100 and 500 ms, so a sparse range stops waiting the
+full 500 ms on every empty address. An address that stays silent
+through a learned wait gets a second try right away, and both tries
+together never wait longer than 500 ms. Until the first host answers,
+and on a range where none does, each probe waits 500 ms, as before.
+
 ### Port scans (`ns -p`)
 
 In a terminal, a status line shows progress while the scan runs (see
