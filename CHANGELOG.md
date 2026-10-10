@@ -10,9 +10,11 @@
   packet cannot hide a host and no address costs more than before.
   Measured on Windows 11 (median of interleaved runs, same hosts found
   per run): a wired /24 2.0s -> 1.5s, a /22 with one live /24 5.0s ->
-  3.0s, a Wi-Fi /23 4.0s -> 3.5s. A range where nothing answers has
-  nothing to learn from and sweeps as before (an unused /20: 16.4s
-  either way).
+  3.0s. On a Wi-Fi /23, whose round trips vary too much for two tries
+  to fit in 500 ms, nearly every probe still waits 500 ms once, and
+  the sweep is no slower. A range where nothing answers has nothing
+  to learn from and sweeps as before (an unused /20: 16.4s either
+  way).
 
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's
