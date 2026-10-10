@@ -12,21 +12,21 @@ test "tcpConnect maps a closed loopback port to refused" {
     // Port 9 (discard) is effectively never listening, so loopback
     // must answer with RST. Loopback can never genuinely filter, which
     // makes the verdict deterministic within the connect timeout.
-    const outcome = scanner.tcpConnect(.{ 127, 0, 0, 1 }, 9);
+    const outcome = scanner.tcpConnect(std.testing.io, .{ 127, 0, 0, 1 }, 9);
     try std.testing.expectEqual(scanner.ProbeOutcome.refused, outcome);
 }
 
 test "tcpConnect maps an unroutable host to filtered" {
     // TEST-NET-1 is never routed, so nothing out there can answer or
     // refuse; the connect must time out quickly instead of hanging.
-    const outcome = scanner.tcpConnect(.{ 192, 0, 2, 1 }, 80);
+    const outcome = scanner.tcpConnect(std.testing.io, .{ 192, 0, 2, 1 }, 80);
     try std.testing.expectEqual(scanner.ProbeOutcome.filtered, outcome);
 }
 
 test "tcpConnectPort maps an unroutable host to filtered" {
     // Same TEST-NET-1 reasoning as above, through the shorter
     // port-scan timeout instead of the discovery one.
-    const outcome = scanner.tcpConnectPort(.{ 192, 0, 2, 1 }, 80, 500);
+    const outcome = scanner.tcpConnectPort(std.testing.io, .{ 192, 0, 2, 1 }, 80, 500);
     try std.testing.expectEqual(scanner.ProbeOutcome.filtered, outcome);
 }
 
@@ -136,12 +136,13 @@ test "scanPorts returns open ports sorted" {
     try assertSorted(u16, open.items);
 }
 
-test "scanPorts stays sorted over multiple worker waves" {
+test "scanPorts stays sorted over many connects in flight" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    // 300 ports exceeds the worker pool on every OS, so this covers
-    // the multi-wave path. Contents are machine-dependent (loopback
-    // listeners vary), so only the ordering invariant is asserted.
+    // 300 ports outgrow the first window of connects in flight, so
+    // this covers ports settling out of order across several rounds.
+    // Contents are machine-dependent (loopback listeners vary), so only
+    // the ordering invariant is asserted.
     var open = try scanner.scanPorts(
         std.testing.allocator,
         std.testing.io,
