@@ -5,12 +5,18 @@
 - Scans keep many connects in flight at once instead of one per thread
   (#67). A probe that gets no answer no longer ties up a thread for its
   whole timeout, so hosts that drop closed ports, and sweeps of empty
-  ranges, scan several times faster. Port scans start with 64 probes in
-  flight and grow toward 1024 while the host answers promptly. When its
-  answers slow down, the scan halves the number in flight, because a
-  home router sent probes faster than it can answer starts losing open
-  ports. Needs no privileges: on Linux and macOS, `ns` raises its own
-  soft open-file limit as far as the hard limit allows. Measured
+  ranges, scan several times faster. Port scans start with as many
+  probes in flight as the old thread pool had (128 on macOS, 256
+  elsewhere) and grow toward 1024 while the host answers promptly. When
+  its answers slow down, the scan halves the number in flight, but
+  never below where it started, because a home router sent probes
+  faster than it can answer starts losing open ports. A host that was
+  answering and suddenly answers nothing (an iPhone on Wi-Fi does this
+  for seconds under a fast scan) gets the starting pace back, and when
+  the second tries show the host lost many first ones, the ports silent
+  on both get a third try at the old pace. Needs no privileges: on
+  Linux and macOS, `ns` raises its own soft open-file limit as far as
+  the hard limit allows. Measured
   (median of 10, interleaved with the previous build, same ports and
   hosts found):
   - Windows 11: `-p` 1-65535 on a router that drops closed ports
@@ -22,6 +28,12 @@
     that finish in a fraction of a second anyway are slightly slower:
     1-65535 on a host that refuses closed ports 0.10s -> 0.18s, on
     127.0.0.1 0.07s -> 0.12s.
+  - macOS (Apple Silicon, Wi-Fi): `-p` 1-65535 on an iPhone 19.0s ->
+    15.4s, on a mesh router 50.2s -> 45.1s, on a recorder that refuses
+    closed ports 20.0s -> 17.7s, on 127.0.0.1 0.58s -> 0.53s, on an
+    absent host (1-2000) 8.1s -> 2.5s; scanme.nmap.org 1-1024 1.74s ->
+    1.43s; `-s` on a /23 3.1s -> 1.6s, on an empty routed /20 16.2s ->
+    2.6s.
 
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's

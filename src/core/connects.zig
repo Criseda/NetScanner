@@ -80,8 +80,9 @@ pub fn inFlightLimit() usize {
 /// Make every connect `source` hands out and report each result back
 /// to it. Returns once `source` has no more and every connect has
 /// settled. How many are in flight at once is up to a Window: it
-/// starts small, grows while answers come back promptly, and backs off
-/// when they slow down, never past inFlightLimit().
+/// starts at the old thread pool's pace (POOL_PACE), grows while
+/// answers come back promptly, and backs off when they slow down, never
+/// below where it started nor past inFlightLimit().
 ///
 /// `source` is a pointer to anything with two methods:
 /// - `next() ?Job`: the next connect, or null when there are no more
@@ -101,7 +102,8 @@ pub fn run(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, source:
         .source = source,
         .io = io,
         .loops = loops,
-        .window = .init(loops, limit, pace),
+        // Every loop holds at least one connect.
+        .window = .init(@max(loops, @min(POOL_PACE, limit)), limit, pace),
     };
     // Each loop can hold an even share of the largest window.
     const capacity = std.math.divCeil(usize, limit, loops) catch unreachable;
@@ -115,6 +117,15 @@ pub fn run(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, source:
     }
     try loop(Job, allocator, io, &shared, capacity);
 }
+
+/// How many connects the old thread pool kept in flight against one
+/// host (one blocking connect per thread): the pace every host already
+/// took from ns before this engine. An adaptive window never drops
+/// below it. Below it, a slow host that answers in tens of milliseconds
+/// under load (a camera recorder refusing some 3k ports a second) kept
+/// tripping the delay signal, and the window settled under the old
+/// pool, making those scans 15-20% slower than before.
+pub const POOL_PACE: usize = if (builtin.os.tag == .macos) 128 else 256;
 
 /// Most threads one run spreads its connects over. On a fast answer
 /// (loopback, or a LAN host refusing closed ports) the cost is in the
@@ -147,6 +158,9 @@ pub const Pace = enum {
     /// with the pace (a phone in power save answers 200 ms late at any
     /// pace).
     fixed,
+    /// Always the old thread pool's pace (POOL_PACE): for a last try
+    /// at ports a host lost when it was asked faster.
+    pool,
 };
 
 /// How many connects a run keeps in flight, steered by how fast the
@@ -160,14 +174,17 @@ pub const Pace = enum {
 /// home router does exactly this well before the old thread pool's
 /// pace. So the window halves whenever an answer takes much longer than
 /// the fastest one seen, at most once per round trip. Otherwise it
-/// grows by one per settled connect, doubling every round, up from a
-/// small start so the very first probes do not arrive as one burst.
-/// (Growing only one per round after a cut, as TCP does, left the
+/// grows by one per settled connect, doubling every round. It starts,
+/// and stays at least, at `min`, the old thread pool's pace (see
+/// POOL_PACE): a host that copes with that is never asked to take
+/// less. (Growing only one per round after a cut, as TCP does, left the
 /// window small for the rest of a scan after a single slow answer.)
 ///
-/// Silence never shrinks it: a host that drops closed ports leaves most
-/// probes unanswered at any pace, and those only wait out their timeout
-/// in parallel. Plain data with no locking; `run` guards it.
+/// Silence alone never shrinks it: a host that drops closed ports
+/// leaves most probes unanswered at any pace, and those only wait out
+/// their timeout in parallel. Silence from a host that was answering
+/// nearly everything is another matter (see DARK_NS). Plain data with
+/// no locking; `run` guards it.
 pub const Window = struct {
     size: usize,
     min: usize,
@@ -179,20 +196,38 @@ pub const Window = struct {
     hold_until_ns: i96 = 0,
     /// False: the window stays at `max` (Pace.fixed).
     adaptive: bool = true,
+    /// Connects settled so far, and how many of those got an answer.
+    settled: u64 = 0,
+    answered: u64 = 0,
+    /// When the last answer came (ns).
+    last_answer_ns: i96 = 0,
+    /// The host stopped answering altogether (see DARK_NS); the window
+    /// stays put until it answers again.
+    dark: bool = false,
 
-    /// Where an adaptive window starts, within min..max.
-    pub const INITIAL = 64;
     /// How much slower than the fastest answer an answer may be before
     /// it counts as queueing: twice the fastest, plus this much for
     /// ordinary jitter (Wi-Fi especially).
     pub const SLACK_US = 20 * std.time.us_per_ms;
+    /// How long a host that answers most probes may answer none before
+    /// the run counts it as gone dark. An iPhone on Wi-Fi answers some
+    /// 75% of a full scan's probes (refusing closed ports), then, a few
+    /// seconds into 10k probes a second, nothing at all for 5-11s: open
+    /// ports included, both tries of every port in that stretch. Going
+    /// on at full speed only kept it dark and lost those ports for
+    /// good; the old thread pool's pace never set it off. So a dark
+    /// host gets the window's minimum, that pace, back, and silence
+    /// grows it no further until answers resume. A host that drops
+    /// closed ports never answers most probes, so it never counts as
+    /// dark, and neither does a sweep (Pace.fixed).
+    pub const DARK_NS = 500 * std.time.ns_per_ms;
 
     pub fn init(min: usize, max: usize, pace: Pace) Window {
         std.debug.assert(min >= 1 and min <= max);
         return .{
-            .size = if (pace == .adaptive) std.math.clamp(INITIAL, min, max) else max,
+            .size = if (pace == .fixed) max else min,
             .min = min,
-            .max = max,
+            .max = if (pace == .pool) min else max,
             .adaptive = pace == .adaptive,
         };
     }
@@ -200,7 +235,11 @@ pub const Window = struct {
     /// One connect settled at `now_ns`, after `rtt_us`.
     pub fn observe(self: *Window, outcome: Outcome, rtt_us: u64, now_ns: i96) void {
         if (!self.adaptive) return;
+        self.settled += 1;
         if (outcome != .filtered) {
+            self.answered += 1;
+            self.last_answer_ns = now_ns;
+            self.dark = false;
             const fastest = @min(self.fastest_us orelse rtt_us, rtt_us);
             self.fastest_us = fastest;
             if (rtt_us > 2 * fastest + SLACK_US) {
@@ -211,8 +250,20 @@ pub const Window = struct {
                 return;
             }
         }
+        if (outcome == .filtered and self.goneDark(now_ns)) return;
         if (now_ns < self.hold_until_ns) return;
         self.size = @min(self.max, self.size + 1);
+    }
+
+    /// Whether a host that answers most probes has stopped answering
+    /// altogether; the first time, the window drops to its minimum.
+    fn goneDark(self: *Window, now_ns: i96) bool {
+        if (self.dark) return true;
+        if (self.answered == 0 or 2 * self.answered < self.settled) return false;
+        if (now_ns - self.last_answer_ns < DARK_NS) return false;
+        self.dark = true;
+        self.size = self.min;
+        return true;
     }
 };
 

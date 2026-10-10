@@ -197,8 +197,10 @@ pub const ScanOptions = struct {
 ///
 /// Many connects stay in flight at once (connects.run), as many as the
 /// host keeps answering promptly: no thread per port, no sleeps, no
-/// per-port stderr. A second pass then retries
-/// the ports a learned wait left unanswered. Only open ports print, and
+/// per-port stderr. A second pass then retries the ports a learned
+/// wait left unanswered, and a third the ones still silent when the
+/// second showed the host had been losing probes (see
+/// PortScan.needsThirdPass). Only open ports print, and
 /// only when options.stream_results is set; closed and filtered both
 /// mean "not open" and stay silent either way.
 pub fn scanPorts(
@@ -241,6 +243,10 @@ pub fn scanPorts(
     try connects.run(PortProbe, allocator, io, &scan, .adaptive);
     scan.pass = .retry;
     try connects.run(PortProbe, allocator, io, &scan, .adaptive);
+    if (scan.needsThirdPass()) {
+        scan.pass = .third;
+        try connects.run(PortProbe, allocator, io, &scan, .pool);
+    }
 
     std.mem.sort(u16, scan.open_ports.items, {}, u16LessThan);
     return scan.open_ports;
@@ -264,7 +270,7 @@ const PortProbe = struct {
 const PortScan = struct {
     run: Run,
     ip: [4]u8,
-    pass: enum { first, retry } = .first,
+    pass: enum { first, retry, third } = .first,
     /// The next port the first pass tries; past `end` once it is done.
     next_port: u32,
     end: u32,
@@ -275,8 +281,16 @@ const PortScan = struct {
     estimator: rtt.RttEstimator,
     open_ports: std.ArrayList(u16) = .empty,
     /// Ports a learned wait left unanswered, for their second try.
+    /// The second pass then moves the ones still unanswered to the
+    /// front, `silent_twice` of them, for a third try if it comes to
+    /// that. (Each slot is handed out before any port can settle into
+    /// it, so the list is never read where it was just written.)
     retries: std.ArrayList(u16) = .empty,
     next_retry: usize = 0,
+    silent_twice: usize = 0,
+    /// Second tries that got an answer: the first one was lost.
+    answered_twice: usize = 0,
+    next_third: usize = 0,
     /// Progress in half ports: a port settled by its first try counts
     /// two halves, a deferred one a half per try. So the `ports` phase
     /// keeps one unit per port, and still climbs through the first
@@ -298,10 +312,43 @@ const PortScan = struct {
                 if (self.next_retry >= self.retries.items.len) return null;
                 const port = self.retries.items[self.next_retry];
                 self.next_retry += 1;
-                // The wait learned by now, with no third try.
+                // The wait learned by now.
+                return self.probe(port, self.estimator.timeoutMs(), false);
+            },
+            .third => {
+                if (self.next_third >= self.silent_twice) return null;
+                const port = self.retries.items[self.next_third];
+                self.next_third += 1;
                 return self.probe(port, self.estimator.timeoutMs(), false);
             },
         }
+    }
+
+    /// Least second tries answered before a scan counts its first pass
+    /// as lossy (see needsThirdPass). The lossy hosts measured answered
+    /// 4k-26k; scanme.nmap.org, 170 ms away, answers a few hundred as
+    /// slow refusals that missed a tight wait (#71), which a third
+    /// pass would only add a wait for. So it takes a scan big enough
+    /// to overload a host in the first place.
+    const LOSSY_MIN_ANSWERS = 1000;
+
+    /// Whether the ports silent on both tries get a third, slower one.
+    /// They do when many second tries got the answer the first did
+    /// not: then the host was losing probes, not dropping closed ports.
+    /// An iPhone on Wi-Fi, scanned at full pace, answered most of its
+    /// 15-60k second tries, yet in 3 of 16 runs an open port still
+    /// missed both: the phone answered nothing at all for seconds, or
+    /// was busy enough to drop the port's SYN twice. A mesh router lost
+    /// two of its ports in every such run. The third pass goes at the
+    /// old thread pool's pace (connects.Pace.pool), which neither lost
+    /// more ports to than before. A host that drops closed ports
+    /// answers next to none of its retries, and one with a dropped port
+    /// or two (a firewall on the path) has too few: neither pays for a
+    /// third pass.
+    fn needsThirdPass(self: *const PortScan) bool {
+        if (self.run.stopRequested() or self.silent_twice == 0) return false;
+        return self.answered_twice >= LOSSY_MIN_ANSWERS and
+            10 * self.answered_twice >= self.retries.items.len;
     }
 
     /// A port's first try. A learned wait is used only when two tries
@@ -337,6 +384,19 @@ const PortScan = struct {
     pub fn done(self: *PortScan, p: PortProbe, outcome: ProbeOutcome, elapsed_us: u64) void {
         if (outcome != .filtered) self.estimator.observe(elapsed_us);
         const port = p.target.port;
+        if (self.pass == .retry) {
+            if (outcome == .filtered) {
+                self.retries.items[self.silent_twice] = port;
+                self.silent_twice += 1;
+            } else {
+                self.answered_twice += 1;
+            }
+        }
+        // Progress was full after the second pass already.
+        if (self.pass == .third) {
+            if (outcome == .open) self.recordOpen(port);
+            return;
+        }
         switch (outcome) {
             .open => self.recordOpen(port),
             .refused => {},

@@ -18,22 +18,30 @@ test "a fixed window stays at its maximum whatever it observes" {
     try std.testing.expectEqual(@as(usize, 1024), w.size);
 }
 
-test "an adaptive window starts small, within its bounds" {
-    try std.testing.expectEqual(@as(usize, Window.INITIAL), Window.init(1, 1024, .adaptive).size);
-    try std.testing.expectEqual(@as(usize, 16), Window.init(1, 16, .adaptive).size);
-    try std.testing.expectEqual(@as(usize, 100), Window.init(100, 1024, .adaptive).size);
+test "a pool-paced window stays at its minimum whatever it observes" {
+    var w = Window.init(128, 1024, .pool);
+    try std.testing.expectEqual(@as(usize, 128), w.size);
+    w.observe(.refused, 1_000, 0);
+    w.observe(.filtered, 500_000, 1 * ms);
+    w.observe(.refused, 900_000, 2 * ms);
+    try std.testing.expectEqual(@as(usize, 128), w.size);
+}
+
+test "an adaptive window starts at its minimum" {
+    try std.testing.expectEqual(@as(usize, 128), Window.init(128, 1024, .adaptive).size);
+    try std.testing.expectEqual(@as(usize, 16), Window.init(16, 16, .adaptive).size);
 }
 
 test "prompt answers and silence both grow the window, up to its maximum" {
-    var w = Window.init(1, Window.INITIAL + 3, .adaptive);
+    var w = Window.init(64, 64 + 3, .adaptive);
     w.observe(.refused, 1_000, 0);
     w.observe(.open, 1_200, 1 * ms);
     // Silence is no sign of overload: a host that drops closed ports
     // leaves most probes unanswered at any pace.
     w.observe(.filtered, 500_000, 2 * ms);
-    try std.testing.expectEqual(@as(usize, Window.INITIAL + 3), w.size);
+    try std.testing.expectEqual(@as(usize, 64 + 3), w.size);
     w.observe(.refused, 1_000, 3 * ms);
-    try std.testing.expectEqual(@as(usize, Window.INITIAL + 3), w.size);
+    try std.testing.expectEqual(@as(usize, 64 + 3), w.size);
 }
 
 test "a slow answer halves the window once per round trip" {
@@ -58,6 +66,47 @@ test "a slow answer halves the window once per round trip" {
     // ...and a slow one cuts it again.
     w.observe(.refused, slow_us, 200 * ms);
     try std.testing.expectEqual((before / 2 + 1) / 2, w.size);
+}
+
+test "a host that answered most probes and then none counts as dark" {
+    var w = Window.init(64, 1024, .adaptive);
+    var now: i96 = 0;
+    for (0..500) |_| {
+        now += 1 * ms;
+        w.observe(.refused, 1_000, now);
+    }
+    try std.testing.expect(w.size > 64);
+
+    // Silence, but not for long yet: still growing.
+    const grown = w.size;
+    w.observe(.filtered, 100_000, now + 100 * ms);
+    try std.testing.expectEqual(grown + 1, w.size);
+
+    // Nothing at all for DARK_NS: back to the starting pace, and
+    // silence grows it no further...
+    w.observe(.filtered, 100_000, now + Window.DARK_NS);
+    try std.testing.expectEqual(@as(usize, 64), w.size);
+    w.observe(.filtered, 100_000, now + 2 * Window.DARK_NS);
+    try std.testing.expectEqual(@as(usize, 64), w.size);
+
+    // ...until the host answers again.
+    w.observe(.refused, 1_000, now + 3 * Window.DARK_NS);
+    try std.testing.expectEqual(@as(usize, 64 + 1), w.size);
+    w.observe(.filtered, 100_000, now + 3 * Window.DARK_NS + 1 * ms);
+    try std.testing.expectEqual(@as(usize, 64 + 2), w.size);
+}
+
+test "a host that drops most probes never counts as dark" {
+    var w = Window.init(1, 1024, .adaptive);
+    var now: i96 = 0;
+    w.observe(.open, 1_000, now);
+    // One open port, then nothing but silence for a long time: a host
+    // dropping closed ports, which may be probed at full pace.
+    for (0..2000) |_| {
+        now += 1 * ms;
+        w.observe(.filtered, 100_000, now);
+    }
+    try std.testing.expectEqual(@as(usize, 1024), w.size);
 }
 
 test "jitter within the slack does not count as a slowdown" {
@@ -123,7 +172,7 @@ test "run reports open and refused loopback ports, each exactly once" {
     var outcomes: [ports.len]?connects.Outcome = @splat(null);
     var recorder: Recorder = .{ .ports = &ports, .outcomes = &outcomes };
 
-    for ([_]connects.Pace{ .adaptive, .fixed }) |pace| {
+    for ([_]connects.Pace{ .adaptive, .fixed, .pool }) |pace| {
         recorder.index = 0;
         recorder.reports = 0;
         @memset(&outcomes, null);
