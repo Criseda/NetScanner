@@ -5,14 +5,19 @@ test "c_bindings module imports correctly" {
     _ = c_bindings;
 }
 
-test "dumpArpTable reads the kernel table on macOS, null elsewhere" {
-    const table = c_bindings.dumpArpTable(std.testing.allocator);
-    defer if (table) |t| std.testing.allocator.free(t);
-    // The test binary is unsigned and `zig` is its parent, so macOS
-    // hands back an empty table; the sysctl itself must still succeed.
-    if (@import("builtin").os.tag == .macos) {
-        try std.testing.expect(table != null);
-    } else {
-        try std.testing.expect(table == null);
+test "dumpNeighbors reads the kernel table natively" {
+    // netlink, GetIpNetTable2 and sysctl all need no privileges, so the
+    // read itself must succeed. Its contents depend on the machine (on
+    // macOS the unsigned test binary is handed an empty table).
+    const table = c_bindings.dumpNeighbors(std.testing.allocator);
+    try std.testing.expect(table != null);
+    defer std.testing.allocator.free(table.?);
+    for (table.?) |entry| {
+        // Multicast and broadcast rows never come back.
+        try std.testing.expect(entry.ip[0] != 0 and entry.ip[0] < 224);
+        if (entry.mac) |mac| {
+            const broadcast: [6]u8 = @splat(0xff);
+            try std.testing.expect(!std.mem.eql(u8, &mac, &broadcast));
+        }
     }
 }

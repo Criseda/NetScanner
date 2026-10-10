@@ -9,14 +9,14 @@ ARG TARGETARCH
 
 # Compiler (zig links libc and compiles the C helpers), downloader,
 # and the network tools the scanner and its ground-truth checks need:
-# ping for the --ping path, arp for the harvest pass, ip for setup.
+# ping for the --ping path, ip for setup. No net-tools: ns reads the
+# neighbor table over netlink instead of running `arp -a`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
     iproute2 \
     iputils-ping \
-    net-tools \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 

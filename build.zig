@@ -164,10 +164,12 @@ fn buildExe(
 }
 
 /// Everything compiled here also compiles the C helpers and, on
-/// Windows, links the system libraries they call: iphlpapi for
-/// SendARP (resolver.c), ws2_32 for Winsock (resolver.c, tcp_probe.c).
+/// Windows, links the system libraries they call: iphlpapi for SendARP
+/// (resolver.c) and the neighbor table (neighbors.c), ws2_32 for
+/// Winsock (resolver.c, neighbors.c, tcp_probe.c).
 fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     mod.addCSourceFile(.{ .file = b.path("src/c/resolver.c"), .flags = &[_][]const u8{"-Wall"} });
+    mod.addCSourceFile(.{ .file = b.path("src/c/neighbors.c"), .flags = &[_][]const u8{"-Wall"} });
     mod.addIncludePath(b.path("src/c"));
     mod.addIncludePath(b.path("."));
     if (target.result.os.tag == .windows) {
