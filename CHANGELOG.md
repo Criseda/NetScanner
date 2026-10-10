@@ -24,6 +24,81 @@
   empty addresses showed up in each scan (up to 5 on a /24). Only an
   echo reply from the host itself counts now.
 
+- `ns -s` on an attached subnet now also asks the network who is there
+  over multicast: one mDNS service query and one SSDP search go out as
+  the TCP sweep starts, and every device in range that answers is
+  reported, with no ping needed (a fresh reply is proof). Phones,
+  printers, TVs and speakers often drop TCP and ICMP yet answer these.
+  Replies come back to `ns`'s own port, so the system's mDNS service
+  is untouched, and the listener stops when the sweep and ARP check
+  end, so it adds no wait. Routed ranges skip it. With `--hostname` /
+  `--resolve`, an mDNS name heard this way replaces that host's mDNS
+  query; NetBIOS still wins where it answers, so names are as before.
+  **JSON change:** `host.source` can now be `mdns` or `ssdp` (text
+  output tags those hosts `(mdns)` / `(ssdp)`), and a host TCP would
+  have found may now arrive first by multicast. Consumers should
+  accept unknown `source` values.
+
+- Discovery (`ns -s`) reads the ARP table straight from the kernel on
+  Linux (netlink) and Windows (`GetIpNetTable2`), as it already did on
+  macOS, instead of running `arp -a` or `ip neigh`. Linux no longer
+  needs net-tools, and `arp -a` no longer looks up a name for every
+  table entry (seconds of DNS waits after each sweep). The kernel's
+  own verdict on each entry is now used on both OSes: a host it
+  confirmed seconds ago is reported at once (`source` `arp`), with no
+  confirming ping. So a device that drops TCP and ping but answers ARP
+  is now found on Linux too (only Windows found those before, through
+  SendARP). Older entries are still pinged first, as before. Measured
+  (median of 10, `ns -s` on a /24): Windows 11 home LAN 1.8s -> 1.1s,
+  the same 10 hosts every run; Linux Docker lab 11.8s -> 1.1s, all 4
+  neighbours found in every run (was 2-3). macOS is unchanged.
+
+- Scans keep many connects in flight at once instead of one per thread
+  (#67). A probe that gets no answer no longer ties up a thread for its
+  whole timeout, so hosts that drop closed ports, and sweeps of empty
+  ranges, scan several times faster. Port scans start with as many
+  probes in flight as the old thread pool had (128 on macOS, 256
+  elsewhere) and grow toward 1024 while the host answers promptly. When
+  its answers slow down, the scan halves the number in flight, but
+  never below where it started, because a home router sent probes
+  faster than it can answer starts losing open ports. A host that was
+  answering and suddenly answers nothing (an iPhone on Wi-Fi does this
+  for seconds under a fast scan) gets the starting pace back, and when
+  the second tries show the host lost many first ones, the ports silent
+  on both get a third try at the old pace. Needs no privileges: on
+  Linux and macOS, `ns` raises its own soft open-file limit as far as
+  the hard limit allows. Measured
+  (median of 10, interleaved with the previous build, same ports and
+  hosts found):
+  - Windows 11: `-p` 1-65535 on a router that drops closed ports
+    55.6s -> 15.4s, on a NAS that refuses them 4.6s -> 2.9s, on
+    127.0.0.1 3.0s -> 2.6s; `-s` on a /24 2.0s -> 1.5s, on an empty
+    routed /20 16.5s -> 2.2s.
+  - Linux (Docker): `-p` 1-65535 on a host that drops closed ports
+    67.1s -> 14.4s; `-s` on an empty routed /20 16.4s -> 2.2s. Scans
+    that finish in a fraction of a second anyway are slightly slower:
+    1-65535 on a host that refuses closed ports 0.10s -> 0.18s, on
+    127.0.0.1 0.07s -> 0.12s.
+  - macOS (Apple Silicon, Wi-Fi): `-p` 1-65535 on an iPhone 19.0s ->
+    15.4s, on a mesh router 50.2s -> 45.1s, on a recorder that refuses
+    closed ports 20.0s -> 17.7s, on 127.0.0.1 0.58s -> 0.53s, on an
+    absent host (1-2000) 8.1s -> 2.5s; scanme.nmap.org 1-1024 1.74s ->
+    1.43s; `-s` on a /23 3.1s -> 1.6s, on an empty routed /20 16.2s ->
+    2.6s.
+
+- Port scans of distant hosts no longer retry closed ports that were
+  merely slow to refuse. The learned wait now keeps at least 40 ms
+  above the host's average round trip: on a steady link it had settled
+  only a millisecond or two above it, so the slower refusals missed it
+  and were tried again at the end of the scan, for nothing. Measured on
+  Windows 11 against scanme.nmap.org (`1-1024`, 168 ms away): 1-6
+  refused ports retried per run before, none after (the one port
+  dropped on the way still is, as it should be). Same open ports;
+  LAN scans are unchanged, as the 100 ms floor already left more room.
+  A retried port's two tries now also share the 500 ms between them,
+  even if the host slowed down in between (the second could wait the
+  full 500 ms before).
+
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's
   retransmission formula (RFC 6298) over the ports that answered,

@@ -301,16 +301,6 @@ pub fn ipInRange(ip: [4]u8, first: [4]u8, last: [4]u8) bool {
     return value >= ipToU32(first) and value <= ipToU32(last);
 }
 
-/// Represents a single host entry discovered from the operating system's
-/// kernel neighbour/ARP table.
-pub const ArpEntry = struct {
-    ip: [4]u8,
-    mac: ?[6]u8 = null,
-    /// On Linux, `ip neigh` explicitly marks confirmed entries as "REACHABLE"
-    /// or "DELAY" (currently undergoing reachability confirmation).
-    is_reachable: bool = false,
-};
-
 /// Parse a MAC address in colon or hyphen format (e.g., "64-fa-2b-b0-93-f1" or "10:e6:6b:26:7e:53").
 pub fn parseMac(s: []const u8) ?[6]u8 {
     var mac: [6]u8 = undefined;
@@ -332,66 +322,4 @@ pub fn formatMac(buf: *[17]u8, mac: [6]u8) []const u8 {
     return std.mem.print(buf, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
     }) catch "00:00:00:00:00:00";
-}
-
-/// Parse one neighbour-table line into an ArpEntry (IP, optional MAC, and reachability).
-///
-/// Understands three formats:
-///   `arp -a` (macOS/Linux): "? (192.168.1.1) at 00:11:... on en0 ..."
-///   `arp -a` (Windows):     "  192.168.1.1  00-11-22-33-44-55  dynamic"
-///   `ip neigh` (Linux):     "192.168.1.1 dev eth0 lladdr 00:11:... REACHABLE"
-/// Returns null for dead entries (incomplete/FAILED), header lines,
-/// multicast rows and anything unparseable.
-pub fn parseArpEntry(line: []const u8) ?ArpEntry {
-    const trimmed = std.mem.trim(u8, line, " \t\r");
-    if (trimmed.len == 0) return null;
-    if (std.mem.find(u8, trimmed, "incomplete") != null) return null;
-    if (std.mem.find(u8, trimmed, "FAILED") != null) return null;
-
-    // `arp -a` on macOS/Linux puts the address in parentheses ...
-    if (std.mem.findScalar(u8, trimmed, '(')) |open| {
-        const close = std.mem.findScalarPos(u8, trimmed, open, ')') orelse return null;
-        const ip = ipStringToBytes(trimmed[open + 1 .. close]) catch return null;
-        if (ip[0] >= 224) return null;
-
-        var mac: ?[6]u8 = null;
-        if (std.mem.findPos(u8, trimmed, close, " at ")) |at_pos| {
-            const rest = std.mem.trimStart(u8, trimmed[at_pos + 4 ..], " \t");
-            const mac_end = std.mem.findAny(u8, rest, " \t") orelse rest.len;
-            mac = parseMac(rest[0..mac_end]);
-        }
-        return ArpEntry{ .ip = ip, .mac = mac, .is_reachable = false };
-    }
-
-    // Linux `ip neigh` has " lladdr " and reachability states (REACHABLE, DELAY, STALE, etc.)
-    if (std.mem.find(u8, trimmed, " lladdr ")) |lladdr_pos| {
-        const end = std.mem.findAny(u8, trimmed, " \t") orelse trimmed.len;
-        const ip = ipStringToBytes(trimmed[0..end]) catch return null;
-        if (ip[0] >= 224) return null;
-
-        const rest = std.mem.trimStart(u8, trimmed[lladdr_pos + 8 ..], " \t");
-        const mac_end = std.mem.findAny(u8, rest, " \t") orelse rest.len;
-        const mac = parseMac(rest[0..mac_end]);
-        const is_reachable = std.mem.find(u8, trimmed, "REACHABLE") != null or
-            std.mem.find(u8, trimmed, "DELAY") != null;
-        return ArpEntry{ .ip = ip, .mac = mac, .is_reachable = is_reachable };
-    }
-
-    // Windows `arp -a` rows lead with IP, followed by physical address
-    var tokens = std.mem.tokenizeAny(u8, trimmed, " \t");
-    const ip_token = tokens.next() orelse return null;
-    const ip = ipStringToBytes(ip_token) catch return null;
-    if (ip[0] >= 224) return null;
-
-    var mac: ?[6]u8 = null;
-    if (tokens.next()) |mac_token| {
-        mac = parseMac(mac_token);
-    }
-    return ArpEntry{ .ip = ip, .mac = mac };
-}
-
-/// Parse one neighbour-table line into an IP address.
-pub fn parseArpLine(line: []const u8) ?[4]u8 {
-    const entry = parseArpEntry(line) orelse return null;
-    return entry.ip;
 }

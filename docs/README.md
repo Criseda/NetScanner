@@ -33,7 +33,17 @@ ns --version                              # Display version
 
 ### Discovery options (`ns -s`)
 
-- `ns -s <subnet>`: Fast TCP plus ARP discovery (default).
+- `ns -s <subnet>`: Fast TCP, multicast and ARP discovery (default).
+  On a subnet this machine is attached to, `ns` also sends one mDNS
+  query (`_services._dns-sd._udp.local`) and one SSDP search
+  (`ssdp:all`) while the TCP sweep runs, and reports every in-range
+  device that answers: phones, printers, TVs and speakers often
+  drop TCP but answer these. Replies come back to `ns`'s own
+  ephemeral port, so the system's mDNS service is never disturbed,
+  and the listener stops with the sweep, so it adds no time. Routed
+  ranges skip it (multicast does not cross routers). With
+  `--hostname`/`--resolve`, a name an mDNS reply already gave is
+  used as is, without the per-host lookups.
 - `--resolve`: Automatically resolves both hostnames (mDNS port 5353 + NetBIOS port 137 + Reverse DNS PTR) and hardware manufacturers (MAC extraction + OUI database lookup).
 - `--hostname`: Resolves hostnames only (mDNS, NetBIOS, Reverse DNS).
 - `--vendor`: Resolves MAC addresses and hardware manufacturers only.
@@ -146,7 +156,11 @@ always last:
 {"type":"summary","hosts":2,"elapsed_ms":1843}
 ```
 
-- `host.source` is `tcp`, `arp` or `ping` (`--ping` scans).
+- `host.source` is `tcp`, `mdns`, `ssdp`, `arp` or `ping` (`--ping`
+  scans): how the host was first seen. Text output tags non-TCP
+  hosts the same way, e.g. `Host 192.168.1.25 is online (mdns)`.
+  More sources may be added; treat an unknown value as just another
+  way the host was found.
 - `host_detail` lines appear only with `--resolve`, `--hostname` or
   `--vendor`, one per host, after the sweep. Only requested fields are
   present; unresolved ones are `null`.
@@ -179,8 +193,10 @@ always last:
   | `-s --resolve` / `--hostname` | `identify` | hosts resolved / hosts found |
 
   `arp` covers the check of quiet hosts that ignored the TCP probe but
-  sit in the ARP table: each gets one ping (about 1s at most) before it
-  counts as up. An event goes out only when the whole percentage
+  sit in the ARP table. A host the OS confirmed seconds ago counts as
+  up at once and is not part of the phase (Linux and Windows; macOS
+  keeps no such state). Each other entry gets one ping (about 1s at
+  most) before it counts as up. An event goes out only when the whole percentage
   changes, so a phase emits at most about 100 lines whatever its size.
   Within a phase `done` only increases, and each phase ends with exactly
   one `done == total` event. A phase with nothing to do (no ARP entries

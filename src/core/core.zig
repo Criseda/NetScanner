@@ -6,4 +6,6 @@ pub const ports = @import("ports.zig");
 pub const resolver = @import("resolver.zig");
 pub const progress = @import("progress.zig");
 pub const rtt = @import("rtt.zig");
+pub const connects = @import("connects.zig");
 pub const live = @import("live.zig");
+pub const multicast = @import("multicast.zig");

@@ -5,8 +5,11 @@ const c_bindings = @import("bindings");
 const utils = @import("utils.zig");
 
 /// Resolve a single host's name using NetBIOS, mDNS, and Reverse DNS PTR.
+/// `mdns_name` is the host's mDNS name when a multicast reply already
+/// gave it: it takes the mDNS query's place and nothing else's, so a
+/// host that also answers NetBIOS keeps its NetBIOS name, as before.
 /// Returns an allocated string for the caller to free, or null if unknown.
-pub fn resolveHostName(allocator: std.mem.Allocator, ip: [4]u8) ?[]const u8 {
+pub fn resolveHostName(allocator: std.mem.Allocator, ip: [4]u8, mdns_name: ?[]const u8) ?[]const u8 {
     var ip_buf: [16]u8 = undefined;
     const ip_str = utils.ipToCString(&ip_buf, ip);
 
@@ -21,8 +24,8 @@ pub fn resolveHostName(allocator: std.mem.Allocator, ip: [4]u8) ?[]const u8 {
     }
 
     // 2. Try mDNS (fast unicast UDP to port 5353 with 200ms timeout - PS5, Hue, Apple, Smart TVs)
-    if (c_bindings.queryMdns(ip_str.ptr, &name_buf, 200)) |mdns_name| {
-        const clean_name = cleanDomainName(mdns_name);
+    if (mdns_name orelse c_bindings.queryMdns(ip_str.ptr, &name_buf, 200)) |name| {
+        const clean_name = cleanDomainName(name);
         if (clean_name.len > 0) {
             return allocator.dupe(u8, clean_name) catch null;
         }

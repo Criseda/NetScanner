@@ -164,12 +164,16 @@ fn buildExe(
 }
 
 /// Everything compiled here also compiles the C helpers and, on
-/// Windows, links the system libraries they call: iphlpapi for
-/// SendARP (resolver.c) and IcmpSendEcho2 (icmp_ping.c), ws2_32 for
-/// Winsock (resolver.c, tcp_probe.c).
+/// Windows, links the system libraries they call: iphlpapi for SendARP
+/// (resolver.c), the neighbor table (neighbors.c), the adapter list
+/// (multicast.c) and IcmpSendEcho2 (icmp_ping.c), ws2_32 for Winsock
+/// (resolver.c, neighbors.c, tcp_probe.c, multicast.c).
 fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     mod.addCSourceFile(.{ .file = b.path("src/c/resolver.c"), .flags = &[_][]const u8{"-Wall"} });
+    mod.addCSourceFile(.{ .file = b.path("src/c/neighbors.c"), .flags = &[_][]const u8{"-Wall"} });
     mod.addCSourceFile(.{ .file = b.path("src/c/icmp_ping.c"), .flags = &[_][]const u8{"-Wall"} });
+    // UDP sockets for multicast discovery (see multicast.h).
+    mod.addCSourceFile(.{ .file = b.path("src/c/multicast.c"), .flags = &[_][]const u8{"-Wall"} });
     mod.addIncludePath(b.path("src/c"));
     mod.addIncludePath(b.path("."));
     if (target.result.os.tag == .windows) {
