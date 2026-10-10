@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- `ns -s` on an attached subnet now also asks the network who is there
+  over multicast: one mDNS service query and one SSDP search go out as
+  the TCP sweep starts, and every device in range that answers is
+  reported, with no ping needed (a fresh reply is proof). Phones,
+  printers, TVs and speakers often drop TCP and ICMP yet answer these.
+  Replies come back to `ns`'s own port, so the system's mDNS service
+  is untouched, and the listener stops when the sweep and ARP check
+  end, so it adds no wait. Routed ranges skip it. With `--hostname` /
+  `--resolve`, an mDNS name heard this way replaces that host's mDNS
+  query; NetBIOS still wins where it answers, so names are as before.
+  **JSON change:** `host.source` can now be `mdns` or `ssdp` (text
+  output tags those hosts `(mdns)` / `(ssdp)`), and a host TCP would
+  have found may now arrive first by multicast. Consumers should
+  accept unknown `source` values.
+
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's
   retransmission formula (RFC 6298) over the ports that answered,

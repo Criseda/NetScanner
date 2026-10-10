@@ -9,6 +9,12 @@ pub const c = struct {
     pub extern "c" fn get_mac_sendarp(ip_address: [*:0]const u8, out_mac: [*]u8) c_int;
     pub extern "c" fn dump_arp_table(out_len: *usize) ?[*]u8;
     pub extern "c" fn free_arp_table(ptr: [*]u8) void;
+    pub extern "c" fn mc_local_address(first: *const [4]u8, last: *const [4]u8, out_local: *[4]u8) c_int;
+    pub extern "c" fn mc_open(local: *const [4]u8) i64;
+    pub extern "c" fn mc_send(sock: i64, ip: *const [4]u8, port: c_ushort, buf: [*]const u8, len: usize) c_int;
+    pub extern "c" fn mc_recv(sock: i64, timeout_ms: c_int, buf: [*]u8, cap: usize, out_from: *[4]u8) c_int;
+    pub extern "c" fn mc_wake(sock: i64) void;
+    pub extern "c" fn mc_close(sock: i64) void;
 };
 
 const std = @import("std");
@@ -78,3 +84,48 @@ pub fn tcpProbe(ip: [*:0]const u8, port: u16, timeout_ms: c_int) TcpProbe {
         else => .filtered,
     };
 }
+
+/// A UDP socket for multicast discovery (see src/c/multicast.h).
+pub const MulticastSocket = struct {
+    handle: i64,
+
+    /// This machine's address on an attached subnet overlapping
+    /// first..last, or null when the range is off-link.
+    pub fn localAddress(first: [4]u8, last: [4]u8) ?[4]u8 {
+        var local: [4]u8 = undefined;
+        if (c.mc_local_address(&first, &last, &local) != 0) return null;
+        return local;
+    }
+
+    /// Null when the socket cannot be set up.
+    pub fn open(local: [4]u8) ?MulticastSocket {
+        const handle = c.mc_open(&local);
+        if (handle == -1) return null;
+        return .{ .handle = handle };
+    }
+
+    pub fn send(self: MulticastSocket, ip: [4]u8, port: u16, payload: []const u8) bool {
+        return c.mc_send(self.handle, &ip, port, payload.ptr, payload.len) == 0;
+    }
+
+    pub const Datagram = struct { from: [4]u8, data: []u8 };
+    pub const RecvError = error{SocketFailed};
+
+    /// One datagram within timeout_ms, or null when none came.
+    pub fn recv(self: MulticastSocket, timeout_ms: c_int, buf: []u8) RecvError!?Datagram {
+        var from: [4]u8 = undefined;
+        const n = c.mc_recv(self.handle, timeout_ms, buf.ptr, buf.len, &from);
+        if (n < 0) return error.SocketFailed;
+        if (n == 0) return null;
+        return .{ .from = from, .data = buf[0..@intCast(n)] };
+    }
+
+    /// Make a recv waiting on another thread return now.
+    pub fn wake(self: MulticastSocket) void {
+        c.mc_wake(self.handle);
+    }
+
+    pub fn close(self: MulticastSocket) void {
+        c.mc_close(self.handle);
+    }
+};

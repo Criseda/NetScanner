@@ -1,10 +1,11 @@
 //! NetScanner's scanning engine: host discovery and port scanning.
 //!
 //! Everything here runs without root privileges. Host discovery pairs a
-//! fast TCP-connect sweep with an ARP-table harvest, because many LAN
-//! devices (phones, tablets, printers) silently drop TCP packets yet
-//! still answer ARP. A slower one-ping-per-host sweep remains available
-//! as a fallback.
+//! fast TCP-connect sweep with multicast service discovery (mDNS and
+//! SSDP) and an ARP-table harvest, because many LAN devices (phones,
+//! tablets, printers) silently drop TCP packets yet still answer
+//! service discovery, or at least ARP. A slower one-ping-per-host sweep
+//! remains available as a fallback.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,6 +17,7 @@ const ports = @import("ports.zig");
 const resolver = @import("resolver.zig");
 const progress = @import("progress.zig");
 const rtt = @import("rtt.zig");
+const multicast = @import("multicast.zig");
 
 /// How many port-scan workers run at once. One fixed worker per
 /// thread, each pulling the next port from a shared counter, so a
@@ -615,13 +617,21 @@ const Discovery = struct {
     found_mutex: *std.Io.Mutex,
     ip_mac_map: *std.AutoHashMap([4]u8, [6]u8),
     ip_mac_mutex: *std.Io.Mutex,
+    /// Names multicast replies gave away, for `--hostname`. Null when
+    /// nothing collects them (`--ping`).
+    names: ?*NameCache = null,
 
     /// Record a host as found and count it, then print it, tagged with
-    /// how it was found, when results stream.
+    /// how it was found, when results stream. Sources race (the TCP
+    /// sweep and the multicast listener run side by side), so the first
+    /// report of a host wins and later ones are dropped.
     fn reportHost(self: Discovery, ip: [4]u8, comptime source: HostSource) void {
         const run = self.run;
         self.found_mutex.lockUncancelable(run.io);
         defer self.found_mutex.unlock(run.io);
+        for (self.found.items) |known| {
+            if (std.mem.eql(u8, &known, &ip)) return;
+        }
         self.found.append(run.allocator, ip) catch return;
         run.addFound();
         if (run.stream) printHost(run.io, run.stdout_mutex, ip, source, run.json);
@@ -643,9 +653,10 @@ const Discovery = struct {
     }
 };
 
-/// How a host was found. Text output tags only ARP hosts (" (arp)");
-/// JSON output always names the source.
-const HostSource = enum { tcp, arp, ping };
+/// How a host was found. Text output tags the hosts the sweep's own
+/// probe did not find (" (arp)", " (mdns)", " (ssdp)"); JSON output
+/// always names the source.
+const HostSource = enum { tcp, arp, ping, mdns, ssdp };
 
 /// One streamed discovery hit, e.g. `Host 192.168.1.10 is online (arp)`
 /// or `{"type":"host","ip":"192.168.1.10","source":"arp"}`.
@@ -655,7 +666,10 @@ fn printHost(io: std.Io, stdout_mutex: *std.Io.Mutex, ip: [4]u8, comptime source
             ip[0], ip[1], ip[2], ip[3],
         });
     } else {
-        const suffix = if (source == .arp) " (arp)" else "";
+        const suffix = switch (source) {
+            .tcp, .ping => "",
+            .arp, .mdns, .ssdp => " (" ++ @tagName(source) ++ ")",
+        };
         utils.printStdout(io, stdout_mutex, "Host {d}.{d}.{d}.{d} is online" ++ suffix ++ "\n", .{
             ip[0], ip[1], ip[2], ip[3],
         });
@@ -823,27 +837,32 @@ fn collectDetails(d: Discovery, options: NetworkScanOptions, oui_db: *oui.OuiDat
         }
     }
 
-    if (options.resolve_hostname and details.len > 0) resolveHostnames(run, details);
+    if (options.resolve_hostname and details.len > 0) resolveHostnames(run, details, d.names);
     return details;
 }
 
 /// Look up every host's name, 16 at a time, as the `identify` phase. A
-/// stop request keeps the pool from starting new lookups.
-fn resolveHostnames(run: Run, details: []HostDetail) void {
+/// host whose mDNS name a multicast reply already gave skips the mDNS
+/// query. A stop request keeps the pool from starting new lookups.
+fn resolveHostnames(run: Run, details: []HostDetail, names: ?*NameCache) void {
     run.startPhase(.identify, details.len);
     const Job = struct {
         run: Run,
         details: []HostDetail,
+        names: ?*NameCache,
         next: *std.atomic.Value(usize),
     };
     var next_idx: std.atomic.Value(usize) = .init(0);
-    const job = Job{ .run = run, .details = details, .next = &next_idx };
+    const job = Job{ .run = run, .details = details, .names = names, .next = &next_idx };
     const worker = struct {
         fn work(j: Job) void {
             while (!j.run.stopRequested()) {
                 const idx = j.next.fetchAdd(1, .monotonic);
                 if (idx >= j.details.len) break;
-                j.details[idx].hostname = resolver.resolveHostName(j.run.allocator, j.details[idx].ip);
+                const ip = j.details[idx].ip;
+                var name_buf: [256]u8 = undefined;
+                const heard = if (j.names) |cache| cache.get(j.run, ip, &name_buf) else null;
+                j.details[idx].hostname = resolver.resolveHostName(j.run.allocator, ip, heard);
                 j.run.advance();
             }
         }
@@ -1191,7 +1210,9 @@ const TCP_PROBE_PORT = 80;
 /// timeout means "no answer"), read the `arp -a` table for quiet
 /// devices that ignore TCP, then ping each harvest-only candidate
 /// once before reporting it -- ARP entries linger after hosts leave,
-/// so a complete entry alone is not proof.
+/// so a complete entry alone is not proof. On an attached subnet, a
+/// multicast listener runs alongside the first two (see
+/// MulticastListener): its replies need no ping, being fresh proof.
 pub fn scanNetwork(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1219,6 +1240,8 @@ pub fn scanNetwork(
     var ip_mac_map = std.AutoHashMap([4]u8, [6]u8).init(allocator);
     defer ip_mac_map.deinit();
     var ip_mac_mutex: std.Io.Mutex = .init;
+    var names: NameCache = .{ .map = .init(allocator) };
+    defer names.deinit(allocator);
 
     const discovery = Discovery{
         .run = run,
@@ -1226,16 +1249,172 @@ pub fn scanNetwork(
         .found_mutex = &found_mutex,
         .ip_mac_map = &ip_mac_map,
         .ip_mac_mutex = &ip_mac_mutex,
+        .names = &names,
     };
     var targets = try utils.collectIps(allocator, hosts.start, hosts.end);
     defer targets.deinit(allocator);
+
+    var listener: MulticastListener = undefined;
+    const listening = listener.start(discovery, hosts.start, hosts.end, options.resolve_hostname);
+    // Stopped before the results on the normal path; this covers errors.
+    defer if (listening) listener.finish();
+
     run.startPhase(.sweep, targets.items.len);
     sweepHosts(discovery, targets.items);
 
     harvestArp(discovery, hosts.start, hosts.end);
 
+    // Replies stop counting here: the results are about to be sorted
+    // and printed, so nothing may add to them any more.
+    if (listening) listener.finish();
     reportResults(discovery, options, started);
 }
+
+/// Names that multicast replies gave away, keyed by IP, so `--hostname`
+/// can skip the per-host mDNS query for those hosts. Only mDNS names
+/// are kept: an SSDP reply names the device's software, not the device.
+const NameCache = struct {
+    map: std.AutoHashMap([4]u8, []u8),
+    mutex: std.Io.Mutex = .init,
+
+    /// Keep the first name heard for `ip`.
+    fn put(self: *NameCache, run: Run, ip: [4]u8, name: []const u8) void {
+        self.mutex.lockUncancelable(run.io);
+        defer self.mutex.unlock(run.io);
+        const entry = self.map.getOrPut(ip) catch return;
+        if (entry.found_existing) return;
+        entry.value_ptr.* = run.allocator.dupe(u8, name) catch {
+            self.map.removeByPtr(entry.key_ptr);
+            return;
+        };
+    }
+
+    /// The name heard for `ip`, copied into `buf`, or null when none was.
+    fn get(self: *NameCache, run: Run, ip: [4]u8, buf: *[256]u8) ?[]const u8 {
+        self.mutex.lockUncancelable(run.io);
+        defer self.mutex.unlock(run.io);
+        const name = self.map.get(ip) orelse return null;
+        const len = @min(name.len, buf.len);
+        @memcpy(buf[0..len], name[0..len]);
+        return buf[0..len];
+    }
+
+    fn deinit(self: *NameCache, allocator: std.mem.Allocator) void {
+        var values = self.map.valueIterator();
+        while (values.next()) |name| allocator.free(name.*);
+        self.map.deinit();
+    }
+};
+
+/// Multicast discovery, alongside the TCP sweep and the ARP harvest:
+/// one mDNS service-enumeration query and one SSDP search go to their
+/// groups, and a thread of its own reports every in-range host that
+/// answers. Phones, printers, TVs and speakers often drop TCP and ICMP
+/// yet answer these. Replies come back by unicast to our own ephemeral
+/// port, so the system's mDNS or SSDP service is never in the way. The
+/// listener only lasts as long as the phases it runs beside: a reply
+/// that comes later is lost, but the scan never waits for one.
+const MulticastListener = struct {
+    discovery: Discovery,
+    socket: c_bindings.MulticastSocket,
+    first: [4]u8,
+    last: [4]u8,
+    /// Ask each responder for its name too (`--hostname`/`--resolve`).
+    ask_names: bool,
+    stop: std.atomic.Value(bool),
+    thread: ?Thread,
+
+    /// How long to wait for a reply before checking whether to stop.
+    const POLL_MS = 50;
+    /// When the queries go out a second time, so one lost datagram
+    /// cannot hide every device. Still well inside any sweep that has
+    /// a silent IP (CONNECT_TIMEOUT_MS).
+    const RESEND_MS = 250;
+
+    /// Open the socket and start listening. False, with nothing to
+    /// clean up, when the range is not on an attached subnet (multicast
+    /// does not cross routers) or the socket or thread cannot be had.
+    fn start(self: *MulticastListener, d: Discovery, first: [4]u8, last: [4]u8, ask_names: bool) bool {
+        if (utils.ipToU32(first) > utils.ipToU32(last)) return false;
+        const local = c_bindings.MulticastSocket.localAddress(first, last) orelse return false;
+        const socket = c_bindings.MulticastSocket.open(local) orelse return false;
+        self.* = .{
+            .discovery = d,
+            .socket = socket,
+            .first = first,
+            .last = last,
+            .ask_names = ask_names,
+            .stop = .init(false),
+            .thread = null,
+        };
+        self.sendQueries();
+        self.thread = Thread.spawn(.{}, listen, .{self}) catch {
+            socket.close();
+            return false;
+        };
+        return true;
+    }
+
+    /// Stop listening and close the socket. Safe to call twice.
+    fn finish(self: *MulticastListener) void {
+        const thread = self.thread orelse return;
+        self.stop.store(true, .monotonic);
+        // Without this, stopping waits out the rest of the poll.
+        self.socket.wake();
+        thread.join();
+        self.thread = null;
+        self.socket.close();
+    }
+
+    fn sendQueries(self: *MulticastListener) void {
+        _ = self.socket.send(multicast.MDNS_GROUP, multicast.MDNS_PORT, multicast.services_query);
+        _ = self.socket.send(multicast.SSDP_GROUP, multicast.SSDP_PORT, multicast.ssdp_search);
+    }
+
+    fn listen(self: *MulticastListener) void {
+        const run = self.discovery.run;
+        const started = std.Io.Clock.now(.awake, run.io);
+        var resent = false;
+        // Responders already asked for their name, so each is asked once.
+        var asked = std.AutoHashMap([4]u8, void).init(run.allocator);
+        defer asked.deinit();
+        var buf: [9000]u8 = undefined;
+
+        while (!self.stop.load(.monotonic) and !run.stopRequested()) {
+            if (!resent) {
+                const elapsed = started.durationTo(std.Io.Clock.now(.awake, run.io)).nanoseconds;
+                if (elapsed >= RESEND_MS * std.time.ns_per_ms) {
+                    self.sendQueries();
+                    resent = true;
+                }
+            }
+            const datagram = (self.socket.recv(POLL_MS, &buf) catch return) orelse continue;
+            if (!utils.ipInRange(datagram.from, self.first, self.last)) continue;
+            switch (multicast.classify(datagram.data) orelse continue) {
+                .mdns => {
+                    self.discovery.reportHost(datagram.from, .mdns);
+                    var name_buf: [256]u8 = undefined;
+                    if (self.discovery.names) |names| {
+                        if (multicast.hostName(datagram.data, datagram.from, &name_buf)) |name| {
+                            names.put(run, datagram.from, name);
+                        }
+                    }
+                },
+                .ssdp => self.discovery.reportHost(datagram.from, .ssdp),
+            }
+            if (self.ask_names) self.askName(&asked, datagram.from);
+        }
+    }
+
+    /// Send `ip` the unicast mDNS name query the per-host lookup would
+    /// send later, so its answer is in the cache by then.
+    fn askName(self: *MulticastListener, asked: *std.AutoHashMap([4]u8, void), ip: [4]u8) void {
+        const entry = asked.getOrPut(ip) catch return;
+        if (entry.found_existing) return;
+        var query_buf: [64]u8 = undefined;
+        _ = self.socket.send(ip, multicast.MDNS_PORT, multicast.reverseQuery(&query_buf, ip));
+    }
+};
 
 fn tcpWorker(shares: Discovery, ip: [4]u8) void {
     if (tcpProbe(ip)) shares.reportHost(ip, .tcp);

@@ -9,9 +9,9 @@ NetScanner finds live hosts on your local network and scans their
 ports. It needs no root privileges and no extra tools, and a full
 `/24` sweep usually takes about 2 seconds.
 
-By default, discovery combines fast TCP probes with a pass over the
-local ARP table, so quiet hosts that answer ARP but drop TCP still
-show up. If that does not fit your network, `--ping` falls back to
+By default, discovery combines fast TCP probes with mDNS and SSDP
+service discovery and a pass over the local ARP table, so quiet
+hosts (phones, printers, TVs) that drop TCP still show up. If that does not fit your network, `--ping` falls back to
 one ICMP ping per host. In a terminal, a status line shows how far
 the scan has got, and Ctrl+C stops it early with the hosts found so
 far. Piped output streams each host as it is found instead. Either
@@ -43,7 +43,7 @@ ns --help                      # Display help message
 ns --version                   # Display version
 ```
 
-`ns -s` uses fast TCP plus ARP discovery by default (`--ping` uses ICMP).
+`ns -s` uses fast TCP, multicast (mDNS, SSDP) and ARP discovery by default (`--ping` uses ICMP).
 Add `--resolve` (or `--hostname`, `--vendor`) to see device names and hardware manufacturers:
 
 ```sh
