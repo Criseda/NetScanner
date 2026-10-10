@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Scans keep many connects in flight at once instead of one per thread
+  (#67). A probe that gets no answer no longer ties up a thread for its
+  whole timeout, so hosts that drop closed ports, and sweeps of empty
+  ranges, scan several times faster. Port scans start with 64 probes in
+  flight and grow toward 1024 while the host answers promptly. When its
+  answers slow down, the scan halves the number in flight, because a
+  home router sent probes faster than it can answer starts losing open
+  ports. Needs no privileges: on Linux and macOS, `ns` raises its own
+  soft open-file limit as far as the hard limit allows. Measured
+  (median of 10, interleaved with the previous build, same ports and
+  hosts found):
+  - Windows 11: `-p` 1-65535 on a router that drops closed ports
+    55.6s -> 15.4s, on a NAS that refuses them 4.6s -> 2.9s, on
+    127.0.0.1 3.0s -> 2.6s; `-s` on a /24 2.0s -> 1.5s, on an empty
+    routed /20 16.5s -> 2.2s.
+  - Linux (Docker): `-p` 1-65535 on a host that drops closed ports
+    67.1s -> 14.4s; `-s` on an empty routed /20 16.4s -> 2.2s. Scans
+    that finish in a fraction of a second anyway are slightly slower:
+    1-65535 on a host that refuses closed ports 0.10s -> 0.18s, on
+    127.0.0.1 0.07s -> 0.12s.
+
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's
   retransmission formula (RFC 6298) over the ports that answered,
