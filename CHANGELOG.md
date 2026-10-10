@@ -35,6 +35,19 @@
     1.43s; `-s` on a /23 3.1s -> 1.6s, on an empty routed /20 16.2s ->
     2.6s.
 
+- Port scans of distant hosts no longer retry closed ports that were
+  merely slow to refuse. The learned wait now keeps at least 40 ms
+  above the host's average round trip: on a steady link it had settled
+  only a millisecond or two above it, so the slower refusals missed it
+  and were tried again at the end of the scan, for nothing. Measured on
+  Windows 11 against scanme.nmap.org (`1-1024`, 168 ms away): 1-6
+  refused ports retried per run before, none after (the one port
+  dropped on the way still is, as it should be). Same open ports;
+  LAN scans are unchanged, as the 100 ms floor already left more room.
+  A retried port's two tries now also share the 500 ms between them,
+  even if the host slowed down in between (the second could wait the
+  full 500 ms before).
+
 - Port scans (`ns -p`) learn their connect timeout from the host's own
   answers instead of always waiting 500 ms per port: TCP's
   retransmission formula (RFC 6298) over the ports that answered,

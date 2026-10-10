@@ -36,8 +36,18 @@ const PORT_TIMEOUT_MS: u32 = 500;
 /// full scan's load, so this leaves ample headroom; it is also nmap's
 /// default minimum (--min-rtt-timeout).
 const PORT_TIMEOUT_FLOOR_MS: u32 = 100;
+/// The least a learned port-scan timeout waits beyond the host's
+/// smoothed round trip, in milliseconds (see RttEstimator.headroom_ms).
+/// A distant host refusing closed ports answers in a tight band (about
+/// 165-195ms for scanme.nmap.org in #71's measurements), and with no
+/// more room than the band's own variation, 5-30% of the refusals
+/// missed the wait and paid a second try that found nothing. 40ms
+/// clears that band, and still lets two tries fit in PORT_TIMEOUT_MS
+/// up to a 210ms round trip. Below a 60ms srtt the headroom cannot
+/// lift the wait past the floor, so LAN scans are untouched.
+const PORT_TIMEOUT_HEADROOM_MS: u32 = 40;
 comptime {
-    // probePort retries a learned wait only when two tries fit in one
+    // PortScan.firstTry retries a learned wait only when two tries fit in one
     // full wait, so the floor must leave room for that.
     std.debug.assert(2 * PORT_TIMEOUT_FLOOR_MS <= PORT_TIMEOUT_MS);
 }
@@ -173,7 +183,7 @@ pub const ScanOptions = struct {
     stream_results: bool = true,
     /// Per-probe wait cap in milliseconds, fixed for the whole scan.
     /// Null learns it from the host's own answers instead (see
-    /// LearnedTimeout). Exposed as `ns -p ... --timeout <ms>` for
+    /// PortScan.firstTry). Exposed as `ns -p ... --timeout <ms>` for
     /// unusually slow networks, or to pin the wait exactly.
     timeout_ms: ?u16 = null,
     /// Stream `{"type":"port",...}` lines instead of "Open port: N (name)",
@@ -224,7 +234,7 @@ pub fn scanPorts(
         .next_port = start_port,
         .end = end_port,
         .fixed_ms = options.timeout_ms,
-        .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_MS),
+        .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_HEADROOM_MS, PORT_TIMEOUT_MS),
     };
     defer scan.retries.deinit(allocator);
     errdefer scan.open_ports.deinit(allocator);
@@ -264,6 +274,13 @@ const PortProbe = struct {
     deferrable: bool,
 };
 
+/// A port whose first try went unanswered, waiting for its second.
+const Deferred = struct {
+    port: u16,
+    /// How long the try before waited: at most half of PORT_TIMEOUT_MS.
+    waited_ms: u32,
+};
+
 /// One port scan's state: the source connects.run pulls ports from and
 /// reports verdicts to, first for every port, then for the retries.
 /// connects.run calls it one call at a time, so it needs no locks.
@@ -285,7 +302,7 @@ const PortScan = struct {
     /// front, `silent_twice` of them, for a third try if it comes to
     /// that. (Each slot is handed out before any port can settle into
     /// it, so the list is never read where it was just written.)
-    retries: std.ArrayList(u16) = .empty,
+    retries: std.ArrayList(Deferred) = .empty,
     next_retry: usize = 0,
     silent_twice: usize = 0,
     /// Second tries that got an answer: the first one was lost.
@@ -310,16 +327,22 @@ const PortScan = struct {
             },
             .retry => {
                 if (self.next_retry >= self.retries.items.len) return null;
-                const port = self.retries.items[self.next_retry];
+                const deferred = self.retries.items[self.next_retry];
                 self.next_retry += 1;
-                // The wait learned by now.
-                return self.probe(port, self.estimator.timeoutMs(), false);
+                // The wait learned by now, but never more than the
+                // first try left of PORT_TIMEOUT_MS: if the link slowed
+                // down meanwhile, the two tries together still wait no
+                // longer than one fixed timeout would have.
+                const timeout_ms = @min(self.estimator.timeoutMs(), PORT_TIMEOUT_MS - deferred.waited_ms);
+                return self.probe(deferred.port, timeout_ms, false);
             },
             .third => {
                 if (self.next_third >= self.silent_twice) return null;
-                const port = self.retries.items[self.next_third];
+                const deferred = self.retries.items[self.next_third];
                 self.next_third += 1;
-                return self.probe(port, self.estimator.timeoutMs(), false);
+                // The one wait past PORT_TIMEOUT_MS a port can get, and
+                // only on a host that was losing probes.
+                return self.probe(deferred.port, self.estimator.timeoutMs(), false);
             },
         }
     }
@@ -386,7 +409,7 @@ const PortScan = struct {
         const port = p.target.port;
         if (self.pass == .retry) {
             if (outcome == .filtered) {
-                self.retries.items[self.silent_twice] = port;
+                self.retries.items[self.silent_twice] = .{ .port = port, .waited_ms = p.target.timeout_ms };
                 self.silent_twice += 1;
             } else {
                 self.answered_twice += 1;
@@ -401,7 +424,7 @@ const PortScan = struct {
             .open => self.recordOpen(port),
             .refused => {},
             .filtered => if (p.deferrable) {
-                self.retries.appendAssumeCapacity(port);
+                self.retries.appendAssumeCapacity(.{ .port = port, .waited_ms = p.target.timeout_ms });
                 self.advanceHalves(1);
                 return;
             },
