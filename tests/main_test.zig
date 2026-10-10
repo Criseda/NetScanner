@@ -9,5 +9,6 @@ test {
     _ = @import("resolver_test.zig");
     _ = @import("progress_test.zig");
     _ = @import("rtt_test.zig");
+    _ = @import("connects_test.zig");
     _ = @import("live_test.zig");
 }

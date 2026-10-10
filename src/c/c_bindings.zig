@@ -1,6 +1,8 @@
 // Direct extern declaration without using @cImport
 pub const c = struct {
-    pub extern "c" fn tcp_probe(ip_address: [*:0]const u8, port: u16, timeout_ms: c_int) c_int;
+    pub extern "c" fn tcp_probe_start(ip: *const [4]u8, port: u16, timeout_ms: c_int, out_sock: *usize) c_int;
+    pub extern "c" fn tcp_probe_wait(socks: [*]const usize, count: c_int, wait_ms: c_int, settled: [*]u8) c_int;
+    pub extern "c" fn tcp_probe_finish(sock: usize, settled: c_int) c_int;
     pub extern "c" fn resolve_ptr(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize) c_int;
     pub extern "c" fn query_netbios(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
     pub extern "c" fn query_mdns(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
@@ -97,18 +99,45 @@ pub fn queryMdns(ip_null_terminated: [*:0]const u8, buf: []u8, timeout_ms: c_int
     return null;
 }
 
+/// Most sockets one tcpProbeWait call watches (TCP_PROBE_MAX_SOCKETS
+/// in src/c/tcp_probe.h).
+pub const TCP_PROBE_MAX_SOCKETS = 4096;
+
 pub const TcpProbe = enum(c_int) {
     open = 0,
     refused = 1,
     filtered = 2,
+    pending = 3,
 };
 
-/// One TCP connect attempt with a timeout, via the Windows Winsock
-/// helper. Anything unclassifiable counts as filtered.
-pub fn tcpProbe(ip: [*:0]const u8, port: u16, timeout_ms: c_int) TcpProbe {
-    return switch (c.tcp_probe(ip, port, timeout_ms)) {
+fn toTcpProbe(raw: c_int) TcpProbe {
+    return switch (raw) {
         @backingInt(TcpProbe.open) => .open,
         @backingInt(TcpProbe.refused) => .refused,
+        @backingInt(TcpProbe.pending) => .pending,
         else => .filtered,
+    };
+}
+
+/// Windows: begin a non-blocking connect to ip:port. `.pending` leaves
+/// the socket in `out_sock` for tcpProbeWait and tcpProbeFinish; any
+/// other result is final and the socket is already closed.
+pub fn tcpProbeStart(ip: [4]u8, port: u16, timeout_ms: c_int, out_sock: *usize) TcpProbe {
+    return toTcpProbe(c.tcp_probe_start(&ip, port, timeout_ms, out_sock));
+}
+
+/// Windows: wait up to wait_ms for any of `socks` to settle, marking
+/// settled[i] for each that did. False on failure.
+pub fn tcpProbeWait(socks: []const usize, wait_ms: c_int, settled: []u8) bool {
+    std.debug.assert(socks.len <= TCP_PROBE_MAX_SOCKETS and settled.len >= socks.len);
+    return c.tcp_probe_wait(socks.ptr, @intCast(socks.len), wait_ms, settled.ptr) >= 0;
+}
+
+/// Windows: a pending socket's verdict, closing it. `settled` false
+/// means its deadline passed first.
+pub fn tcpProbeFinish(sock: usize, settled: bool) TcpProbe {
+    return switch (toTcpProbe(c.tcp_probe_finish(sock, @intFromBool(settled)))) {
+        .pending => .filtered,
+        else => |verdict| verdict,
     };
 }
