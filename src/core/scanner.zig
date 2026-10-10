@@ -1038,11 +1038,9 @@ pub fn scanNetworkPing(
     allocator.free(alive);
 
     // MACs for --vendor; the ping sweep confirmed every host itself.
-    if (dumpArpTable(allocator, io)) |table| {
+    if (readNeighbors(allocator)) |table| {
         defer allocator.free(table);
-        var lines = std.mem.splitScalar(u8, table, '\n');
-        while (lines.next()) |line| {
-            const entry = utils.parseArpEntry(line) orelse continue;
+        for (table) |entry| {
             if (entry.mac) |mac| discovery.recordMac(entry.ip, mac);
         }
     }
@@ -1061,10 +1059,10 @@ const TCP_PROBE_PORT = 80;
 ///
 /// Three steps: probe one common TCP port per IP (a connect that
 /// succeeds or is actively refused proves the host is up; only a
-/// timeout means "no answer"), read the `arp -a` table for quiet
-/// devices that ignore TCP, then ping each harvest-only candidate
-/// once before reporting it -- ARP entries linger after hosts leave,
-/// so a complete entry alone is not proof.
+/// timeout means "no answer"), then read the neighbor table for quiet
+/// devices that ignore TCP. An entry the kernel confirmed just now is
+/// reported as is; an older one gets a ping first -- ARP entries
+/// linger after hosts leave, so an old entry alone is not proof.
 pub fn scanNetwork(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1110,38 +1108,33 @@ pub fn scanNetwork(
     reportResults(discovery, options, started);
 }
 
-/// Read the local ARP table for in-range hosts the TCP sweep missed,
-/// then ping each candidate once before reporting it. The ping matters:
-/// entries linger up to ~20min after a host leaves, so a complete entry
-/// alone is not proof. Needs no privileges; `arp -a` exists on macOS,
-/// Linux and Windows, and all three table formats are parsed.
+/// Read the neighbor table for in-range hosts the TCP sweep missed. The
+/// sweep's own connects make the kernel ARP every on-link address, so a
+/// quiet host that drops TCP and ICMP but answers ARP is in the table by
+/// now, marked reachable: confirmed seconds ago, it is reported at once.
+/// Any other entry is pinged once first: entries linger up to ~20min
+/// after a host leaves, so an old one alone is not proof. Needs no
+/// privileges and spawns nothing; the table is read natively
+/// (readNeighbors).
 fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     const run = shares.run;
     // No size until the table is read: the display shows just the label.
     run.startPhase(.arp, 0);
-    const table = dumpArpTable(run.allocator, run.io) orelse return;
+    const table = readNeighbors(run.allocator) orelse return;
     defer run.allocator.free(table);
 
     var candidates: std.ArrayList([4]u8) = .empty;
     defer candidates.deinit(run.allocator);
-    var lines = std.mem.splitScalar(u8, table, '\n');
-    while (lines.next()) |line| {
-        const entry = utils.parseArpEntry(line) orelse continue;
-        if (entry.mac) |mac| {
-            shares.recordMac(entry.ip, mac);
-        }
+    for (table) |entry| {
+        if (entry.mac) |mac| shares.recordMac(entry.ip, mac);
         if (!utils.ipInRange(entry.ip, first_ip, last_ip)) continue;
         if (shares.isFound(entry.ip)) continue;
-
-        // If the OS kernel's neighbor table explicitly marks this entry as actively
-        // REACHABLE or in DELAY state (e.g. Linux `ip neigh`), the kernel has recently
-        // exchanged packets with this host and confirmed its Layer 2 presence. We can
-        // report it immediately without waiting on an ICMP ping.
-        if (entry.is_reachable) {
+        if (entry.state == .reachable) {
             shares.reportHost(entry.ip, .arp);
             continue;
         }
-
+        // A host seen on two interfaces is listed twice; ping it once.
+        if (containsIp(candidates.items, entry.ip)) continue;
         candidates.append(run.allocator, entry.ip) catch continue;
     }
     // After a stop request the table above still supplied MACs (reading
@@ -1225,48 +1218,33 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
     }
 }
 
-/// Dump the neighbour table. Prefers `arp -a`, falls back to
-/// `ip neigh show` (minimal Linux distros often lack net-tools).
-/// Returns the output for the caller to free, or null when neither
-/// tool exists -- then discovery just ends after the TCP sweep.
+fn containsIp(ips: []const [4]u8, ip: [4]u8) bool {
+    for (ips) |known| {
+        if (std.mem.eql(u8, &known, &ip)) return true;
+    }
+    return false;
+}
+
+/// The kernel's IPv4 neighbor table, read natively (see neighbors.h):
+/// no `arp -a` or `ip neigh` to spawn, no localized text to parse, and
+/// no net-tools needed on Linux. Null when it cannot be read; then
+/// discovery just ends after the TCP sweep.
 ///
-/// macOS reads the kernel table directly instead: since macOS 27 the
-/// OS hides it from anything a third-party binary spawns, so `arp -a`
-/// run from `ns` always prints nothing. Even the direct read needs
-/// `ns` codesigned with a reverse-DNS identifier (build.zig does that)
-/// and a shell, not another third-party program, as its parent.
-pub fn dumpArpTable(allocator: std.mem.Allocator, io: std.Io) ?[]u8 {
-    if (comptime builtin.os.tag == .macos) {
-        if (c_bindings.dumpArpTable(allocator)) |table| {
-            // A LAN host always has at least its gateway in the table,
-            // so empty means macOS filtered it: say why the MAC column
-            // and quiet-host harvest will be blank instead of failing
-            // silently.
-            if (table.len == 0) {
-                std.debug.print("arp table is empty: macOS hides it unless ns is codesigned with an " ++
-                    "identifier (`zig build` on a Mac does this) and launched directly from a shell; " ++
-                    "MAC addresses, manufacturers and quiet hosts will be missing\n", .{});
-            }
-            return table;
-        }
-    }
-    const commands = [_][]const []const u8{
-        &.{ "arp", "-a" },
-        &.{ "ip", "neigh", "show" },
+/// macOS 27 hides the table unless `ns` is codesigned with a
+/// reverse-DNS identifier (build.zig does that) and has a shell, not
+/// another third-party program, as its parent.
+pub fn readNeighbors(allocator: std.mem.Allocator) ?[]c_bindings.Neighbor {
+    const table = c_bindings.dumpNeighbors(allocator) orelse {
+        std.debug.print("arp harvest skipped: cannot read the neighbor table\n", .{});
+        return null;
     };
-    for (commands) |argv| {
-        const result = std.process.run(allocator, io, .{ .argv = argv }) catch |err| {
-            // Missing tool: try the next one. Anything else is a real
-            // failure, so stop instead of running stranger commands.
-            if (err != error.FileNotFound) {
-                std.debug.print("arp harvest skipped: {}\n", .{err});
-                return null;
-            }
-            continue;
-        };
-        allocator.free(result.stderr);
-        return result.stdout;
+    // A LAN host always has at least its gateway in the table, so empty
+    // means macOS filtered it: say why the MAC column and quiet-host
+    // harvest will be blank instead of failing silently.
+    if (builtin.os.tag == .macos and table.len == 0) {
+        std.debug.print("arp table is empty: macOS hides it unless ns is codesigned with an " ++
+            "identifier (`zig build` on a Mac does this) and launched directly from a shell; " ++
+            "MAC addresses, manufacturers and quiet hosts will be missing\n", .{});
     }
-    std.debug.print("arp harvest skipped: neither `arp` nor `ip` found\n", .{});
-    return null;
+    return table;
 }

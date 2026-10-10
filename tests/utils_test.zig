@@ -140,49 +140,6 @@ test "ipInRange checks bounds inclusively" {
     try std.testing.expect(!utils.ipInRange([4]u8{ 192, 168, 2, 1 }, first, last));
 }
 
-test "parseArpLine reads macOS and Linux arp -a lines" {
-    const mac = utils.parseArpLine("? (192.168.1.1) at 10:e6:6b:26:7e:53 on en0 ifscope [ethernet]");
-    try std.testing.expect(mac != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &mac.?);
-
-    const linux = utils.parseArpLine("? (192.168.1.20) at aa:bb:cc:dd:ee:ff [ether] on eth0");
-    try std.testing.expect(linux != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 20 }, &linux.?);
-
-    // `ip neigh show` format, including dead and multicast lines.
-    const neigh = utils.parseArpLine("192.168.1.20 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE");
-    try std.testing.expect(neigh != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 20 }, &neigh.?);
-    try std.testing.expect(utils.parseArpLine("192.168.1.22 dev eth0  FAILED") == null);
-    try std.testing.expect(utils.parseArpLine("224.0.0.251 dev eth0 lladdr 01:00:5e:00:00:fb REACHABLE") == null);
-
-    // Incomplete entries and garbage yield null.
-    try std.testing.expect(utils.parseArpLine("? (192.168.1.22) at (incomplete) on en0 ifscope [ethernet]") == null);
-    try std.testing.expect(utils.parseArpLine("not an arp line") == null);
-}
-
-test "parseArpLine reads Windows arp -a lines" {
-    // Real rows: dynamic and static entries alike.
-    const dynamic = utils.parseArpLine("  192.168.1.1           00-11-22-33-44-55     dynamic");
-    try std.testing.expect(dynamic != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &dynamic.?);
-
-    const stat = utils.parseArpLine("  192.168.1.50          aa-bb-cc-dd-ee-ff     dynamic");
-    try std.testing.expect(stat != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 50 }, &stat.?);
-
-    // Headers, blank lines and the empty-table message yield null.
-    try std.testing.expect(utils.parseArpLine("Interface: 192.168.1.100 --- 0x5") == null);
-    try std.testing.expect(utils.parseArpLine("  Internet Address      Physical Address      Type") == null);
-    try std.testing.expect(utils.parseArpLine("") == null);
-    try std.testing.expect(utils.parseArpLine("No ARP Entries Found.") == null);
-
-    // Multicast, broadcast and limited-broadcast rows yield null.
-    try std.testing.expect(utils.parseArpLine("  224.0.0.251           01-00-5e-00-00-fb     static") == null);
-    try std.testing.expect(utils.parseArpLine("  239.255.255.250       01-00-5e-7f-ff-fa     static") == null);
-    try std.testing.expect(utils.parseArpLine("  255.255.255.255       ff-ff-ff-ff-ff-ff     static") == null);
-}
-
 test "usableHosts skips network and broadcast addresses" {
     const network = utils.Network{ .address = .{ 192, 168, 1, 0 }, .prefix_len = 24 };
     const range = utils.IpRange{ .start = .{ 192, 168, 1, 0 }, .end = .{ 192, 168, 1, 255 } };
@@ -229,53 +186,6 @@ test "parseMac and formatMac" {
     try std.testing.expect(utils.parseMac("00:11:22:33:44") == null);
     try std.testing.expect(utils.parseMac("00:11:22:33:44:55:66") == null);
     try std.testing.expect(utils.parseMac("00:11:22:33:44:zz") == null);
-}
-
-test "parseArpEntry extracts both IP and MAC" {
-    // macOS
-    const mac_line = utils.parseArpEntry("? (192.168.1.1) at 00:11:22:33:44:55 on en0 ifscope [ethernet]");
-    try std.testing.expect(mac_line != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 1 }, &mac_line.?.ip);
-    try std.testing.expect(mac_line.?.mac != null);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 }, &mac_line.?.mac.?);
-    try std.testing.expect(!mac_line.?.is_reachable);
-
-    // Linux ip neigh (REACHABLE)
-    const neigh_line = utils.parseArpEntry("192.168.1.20 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE");
-    try std.testing.expect(neigh_line != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 20 }, &neigh_line.?.ip);
-    try std.testing.expect(neigh_line.?.mac != null);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff }, &neigh_line.?.mac.?);
-    try std.testing.expect(neigh_line.?.is_reachable);
-
-    // Linux ip neigh (DELAY)
-    const delay_line = utils.parseArpEntry("192.168.1.21 dev eth0 lladdr 11:22:33:44:55:66 DELAY");
-    try std.testing.expect(delay_line != null);
-    try std.testing.expect(delay_line.?.is_reachable);
-
-    // Linux ip neigh (STALE)
-    const stale_line = utils.parseArpEntry("192.168.1.22 dev eth0 lladdr 11:22:33:44:55:77 STALE");
-    try std.testing.expect(stale_line != null);
-    try std.testing.expect(!stale_line.?.is_reachable);
-
-    // Windows
-    const win_line = utils.parseArpEntry("  192.168.1.50          00-11-22-33-44-55     dynamic");
-    try std.testing.expect(win_line != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 50 }, &win_line.?.ip);
-    try std.testing.expect(win_line.?.mac != null);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 }, &win_line.?.mac.?);
-    try std.testing.expect(!win_line.?.is_reachable);
-}
-
-test "parseArpEntry handles rows from the native macOS reader" {
-    // dump_arp_table (resolver.c) prints unpadded `arp -a` rows.
-    const row = utils.parseArpEntry("? (192.168.1.105) at 00:0a:9f:69:28:09 on en0 [ethernet]");
-    try std.testing.expect(row != null);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 192, 168, 1, 105 }, &row.?.ip);
-    try std.testing.expectEqualSlices(u8, &[6]u8{ 0x00, 0x0a, 0x9f, 0x69, 0x28, 0x09 }, &row.?.mac.?);
-
-    // Unresolved entries are dropped, as with `arp -a`.
-    try std.testing.expect(utils.parseArpEntry("? (192.168.1.200) at (incomplete) on en0") == null);
 }
 
 test "jsonEscape escapes quotes, backslashes and control bytes" {

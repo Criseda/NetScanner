@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Discovery (`ns -s`) reads the ARP table straight from the kernel on
+  Linux (netlink) and Windows (`GetIpNetTable2`), as it already did on
+  macOS, instead of running `arp -a` or `ip neigh`. Linux no longer
+  needs net-tools, and `arp -a` no longer looks up a name for every
+  table entry (seconds of DNS waits after each sweep). The kernel's
+  own verdict on each entry is now used on both OSes: a host it
+  confirmed seconds ago is reported at once (`source` `arp`), with no
+  confirming ping. So a device that drops TCP and ping but answers ARP
+  is now found on Linux too (only Windows found those before, through
+  SendARP). Older entries are still pinged first, as before. Measured
+  (median of 10, `ns -s` on a /24): Windows 11 home LAN 1.8s -> 1.1s,
+  the same 10 hosts every run; Linux Docker lab 11.8s -> 1.1s, all 4
+  neighbours found in every run (was 2-3). macOS is unchanged.
+
 - Scans keep many connects in flight at once instead of one per thread
   (#67). A probe that gets no answer no longer ties up a thread for its
   whole timeout, so hosts that drop closed ports, and sweeps of empty
