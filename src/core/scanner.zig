@@ -47,6 +47,16 @@ const PORT_TIMEOUT_MS: u32 = 500;
 /// full scan's load, so this leaves ample headroom; it is also nmap's
 /// default minimum (--min-rtt-timeout).
 const PORT_TIMEOUT_FLOOR_MS: u32 = 100;
+/// The least a learned port-scan timeout waits beyond the host's
+/// smoothed round trip, in milliseconds (see RttEstimator.headroom_ms).
+/// A distant host refusing closed ports answers in a tight band (about
+/// 165-195ms for scanme.nmap.org in #71's measurements), and with no
+/// more room than the band's own variation, 5-30% of the refusals
+/// missed the wait and paid a second try that found nothing. 40ms
+/// clears that band, and still lets two tries fit in PORT_TIMEOUT_MS
+/// up to a 210ms round trip. Below a 60ms srtt the headroom cannot
+/// lift the wait past the floor, so LAN scans are untouched.
+const PORT_TIMEOUT_HEADROOM_MS: u32 = 40;
 comptime {
     // probePort retries a learned wait only when two tries fit in one
     // full wait, so the floor must leave room for that.
@@ -318,7 +328,7 @@ pub fn scanPorts(
 
     // The explicit override waits the same for every probe. Otherwise
     // the wait is learned from this host's answers as the scan goes.
-    var learned: LearnedTimeout = .{ .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_MS) };
+    var learned: LearnedTimeout = .{ .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_HEADROOM_MS, PORT_TIMEOUT_MS) };
     const timeout: PortTimeout = if (options.timeout_ms) |t| .{ .fixed = t } else .{ .learned = &learned };
     const total: usize = @as(usize, end_port) - start_port + 1;
 
@@ -337,7 +347,7 @@ pub fn scanPorts(
     // it goes back to the caller (see u16LessThan below).
     var ports_mutex: std.Io.Mutex = .init;
     var next_port: std.atomic.Value(u32) = .init(start_port);
-    var retries: std.ArrayList(u16) = .empty;
+    var retries: std.ArrayList(Deferred) = .empty;
     defer retries.deinit(allocator);
     var next_retry: std.atomic.Value(usize) = .init(0);
     var half_units: std.atomic.Value(usize) = .init(0);
@@ -406,7 +416,7 @@ const PortShares = struct {
     /// Also guards `retries` while the first pass fills it.
     ports_mutex: *std.Io.Mutex,
     /// Ports a learned wait left unanswered, for their second try.
-    retries: *std.ArrayList(u16),
+    retries: *std.ArrayList(Deferred),
     next_retry: *std.atomic.Value(usize),
     /// Progress in half ports: a port settled by its first try counts
     /// two halves, a deferred one a half per try. So the `ports` phase
@@ -457,12 +467,14 @@ fn portWorker(shares: PortShares) void {
         switch (probePort(shares, port)) {
             .open => recordOpenPort(shares, port),
             .not_open => {},
-            .retry_later => if (deferRetry(shares, port)) {
-                shares.advanceHalves(1);
-                continue;
-            } else {
+            .retry_later => |waited_ms| {
+                const deferred: Deferred = .{ .port = port, .waited_ms = waited_ms };
+                if (deferRetry(shares, deferred)) {
+                    shares.advanceHalves(1);
+                    continue;
+                }
                 // No room to defer it: the second try happens now.
-                secondTry(shares, port);
+                secondTry(shares, deferred);
             },
         }
         shares.advanceHalves(2);
@@ -479,23 +491,34 @@ fn retryWorker(shares: PortShares) void {
     }
 }
 
-/// A deferred port's second try, with the wait learned by then.
-fn secondTry(shares: PortShares, port: u16) void {
+/// A deferred port's second try, with the wait learned by then, but
+/// never more than its first try left of PORT_TIMEOUT_MS: if the link
+/// slowed down meanwhile, the two tries together still wait no longer
+/// than one fixed timeout would have.
+fn secondTry(shares: PortShares, deferred: Deferred) void {
     const learned = shares.timeout.learned;
     const io = shares.run.io;
-    if (learned.probe(io, shares.ip, port, learned.current(io)) == .open) {
-        recordOpenPort(shares, port);
+    const timeout_ms = @min(learned.current(io), PORT_TIMEOUT_MS - deferred.waited_ms);
+    if (learned.probe(io, shares.ip, deferred.port, timeout_ms) == .open) {
+        recordOpenPort(shares, deferred.port);
     }
 }
 
-/// Queue `port` for the second pass. False if the list cannot grow.
-fn deferRetry(shares: PortShares, port: u16) bool {
+/// Queue a port for the second pass. False if the list cannot grow.
+fn deferRetry(shares: PortShares, deferred: Deferred) bool {
     const io = shares.run.io;
     shares.ports_mutex.lockUncancelable(io);
     defer shares.ports_mutex.unlock(io);
-    shares.retries.append(shares.run.allocator, port) catch return false;
+    shares.retries.append(shares.run.allocator, deferred) catch return false;
     return true;
 }
+
+/// A port whose first try went unanswered, waiting for its second.
+const Deferred = struct {
+    port: u16,
+    /// How long the first try waited: at most half of PORT_TIMEOUT_MS.
+    waited_ms: u32,
+};
 
 /// How long a port-scan probe waits for an answer.
 const PortTimeout = union(enum) {
@@ -505,8 +528,9 @@ const PortTimeout = union(enum) {
     learned: *LearnedTimeout,
 };
 
-/// What a port's first try decided.
-const FirstTry = enum { open, not_open, retry_later };
+/// What a port's first try decided. `retry_later` carries how long
+/// the try waited, in milliseconds.
+const FirstTry = union(enum) { open, not_open, retry_later: u32 };
 
 /// Give one port its first try with the scan's timeout. A learned wait
 /// is used only when two tries of it fit in PORT_TIMEOUT_MS, and an
@@ -525,7 +549,7 @@ fn probePort(shares: PortShares, port: u16) FirstTry {
             const timeout_ms = learned.current(io);
             if (2 * timeout_ms > PORT_TIMEOUT_MS) break :learned learned.probe(io, shares.ip, port, PORT_TIMEOUT_MS);
             const first = learned.probe(io, shares.ip, port, timeout_ms);
-            if (first == .filtered) return .retry_later;
+            if (first == .filtered) return .{ .retry_later = timeout_ms };
             break :learned first;
         },
     };
