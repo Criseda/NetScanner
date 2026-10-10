@@ -580,7 +580,7 @@ fn recordOpenPort(shares: PortShares, port: u16) void {
 // ---------------------------------------------------------------------------
 // Host discovery: a fixed pool of workers, each pulling the next IP
 // from a shared index. The ping fallback (scanNetworkPing) does not
-// use this machinery; it runs waves of ping processes (pingSweep).
+// use this machinery; it pings from inside the process (pingSweep).
 // ---------------------------------------------------------------------------
 
 pub const NetworkScanOptions = struct {
@@ -989,38 +989,45 @@ fn printScanHeader(run: Run, cidr: []const u8, range: utils.IpRange) void {
     });
 }
 
-/// How many ping(1) processes run at once. A /24 still pings every
-/// host at once; larger ranges go in waves of this many, instead of
-/// starting a process per host all together (a /16 would be 65,534,
-/// far past the per-user process limit).
+/// How long a ping waits for its reply, in milliseconds: what ping(1)
+/// is told to wait (see pingArgv), so both paths find the same hosts.
+const PING_TIMEOUT_MS = 1000;
+
+/// How many echoes the in-process sweep keeps unanswered at once. Each
+/// one to a host on the local link also holds a neighbour (ARP) entry
+/// while it waits, and Linux caps that table at 1024 entries by default
+/// (gc_thresh3), so this stays well under that.
+const MAX_PINGS_IN_FLIGHT = 512;
+
+/// How many ping(1) processes run at once, when ping(1) does the work.
+/// A /24 still pings every host at once; larger ranges go in waves of
+/// this many, instead of starting a process per host all together (a
+/// /16 would be 65,534, far past the per-user process limit).
 const MAX_PING_PROCESSES = 256;
 
 /// Ping every IP in the list and return which answered, in input order.
 /// Hosts never pinged (after a stop request) count as unanswered.
 /// Caller frees the result.
 ///
-/// Pings run in waves of up to MAX_PING_PROCESSES, so a /24 takes about
-/// one ping wait. Each wave is spawned from this thread, one process
-/// after another (std's spawn allocates, which only slows down when
-/// hundreds of threads do it at once), then every ping gets a thread of
-/// its own to wait on it. So results arrive in completion order: a dead
-/// host no longer holds back the answers behind it, as it did when the
-/// pings were reaped in input order.
+/// The echoes go out from inside ns (icmp_ping.c), with no privileges,
+/// paced, with up to MAX_PINGS_IN_FLIGHT waiting at once: no process
+/// per host, and each host waits its own PING_TIMEOUT_MS instead of
+/// for the slowest host of its wave. Where the OS forbids that (Linux
+/// with the user's group outside net.ipv4.ping_group_range), ping(1)
+/// does it instead, in waves (pingWave).
 ///
-/// `observer.pinged(index, answered)` runs on the waiting thread as each
-/// ping ends. After a stop request no new pings start. Those running
-/// are waited for, never killed: killing would discard the exit status
-/// of pings that had already answered, and their hosts with it. The
-/// wait is short. A terminal Ctrl+C reaches the pings too (they share
-/// ns's process group or console), and each gives up after about 1s
-/// anyway. If a ping cannot even start (out of processes, say), the
-/// sweep stops, waits for the pings already running, and returns that
-/// error.
+/// `observer.pinged(index, answered)` runs as each host's fate is known.
+/// After a stop request no new pings start; those already out are
+/// waited for, about 1s at most, so the hosts that answered are kept.
+/// If a ping(1) cannot even start (out of processes, say), the sweep
+/// stops, waits for the pings already running, and returns that error.
 fn pingSweep(run: Run, ips: []const [4]u8, observer: anytype) ![]bool {
     const alive = try run.allocator.alloc(bool, ips.len);
     errdefer run.allocator.free(alive);
     // Hosts never pinged (the sweep was stopped) count as unanswered.
     @memset(alive, false);
+
+    if (try icmpSweep(run, ips, alive, observer) == .done) return alive;
 
     var first: usize = 0;
     while (first < ips.len and !run.stopRequested()) {
@@ -1031,7 +1038,44 @@ fn pingSweep(run: Run, ips: []const [4]u8, observer: anytype) ![]bool {
     return alive;
 }
 
-/// One wave of pingSweep: ips[first..last], at most MAX_PING_PROCESSES.
+/// pingSweep from inside the process, reporting through `observer` and
+/// `alive`. `.unavailable` when this system does not allow it; then
+/// nothing was pinged or reported.
+fn icmpSweep(run: Run, ips: []const [4]u8, alive: []bool, observer: anytype) !c_bindings.IcmpSweep {
+    const Context = struct {
+        run: Run,
+        alive: []bool,
+        observer: @TypeOf(observer),
+
+        fn pinged(ctx: *anyopaque, index: usize, answered: c_int) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.alive[index] = answered != 0;
+            self.observer.pinged(index, answered != 0);
+        }
+
+        fn stopRequested(ctx: *anyopaque) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return @intFromBool(self.run.stopRequested());
+        }
+    };
+    var context: Context = .{ .run = run, .alive = alive, .observer = observer };
+    const c_observer: c_bindings.IcmpObserver = .{
+        .ctx = &context,
+        .pinged = Context.pinged,
+        .stop_requested = Context.stopRequested,
+    };
+    return c_bindings.icmpPingSweep(ips, PING_TIMEOUT_MS, MAX_PINGS_IN_FLIGHT, &c_observer);
+}
+
+/// One wave of the ping(1) fallback: ips[first..last], at most
+/// MAX_PING_PROCESSES. Each wave is spawned from this thread, one
+/// process after another (std's spawn allocates, which only slows down
+/// when hundreds of threads do it at once), then every ping gets a
+/// thread of its own to wait on it, so results arrive in completion
+/// order. Running pings are waited for, never killed: killing would
+/// discard the exit status of pings that had already answered. A
+/// terminal Ctrl+C reaches them too (they share ns's process group or
+/// console), and each gives up after about 1s anyway.
 fn pingWave(
     run: Run,
     ips: []const [4]u8,

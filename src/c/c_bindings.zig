@@ -9,6 +9,7 @@ pub const c = struct {
     pub extern "c" fn get_mac_sendarp(ip_address: [*:0]const u8, out_mac: [*]u8) c_int;
     pub extern "c" fn dump_arp_table(out_len: *usize) ?[*]u8;
     pub extern "c" fn free_arp_table(ptr: [*]u8) void;
+    pub extern "c" fn icmp_ping_sweep(ips: [*]const [4]u8, count: usize, timeout_ms: c_int, max_in_flight: usize, observer: *const IcmpObserver) c_int;
 };
 
 const std = @import("std");
@@ -76,5 +77,26 @@ pub fn tcpProbe(ip: [*:0]const u8, port: u16, timeout_ms: c_int) TcpProbe {
         @backingInt(TcpProbe.open) => .open,
         @backingInt(TcpProbe.refused) => .refused,
         else => .filtered,
+    };
+}
+
+/// Mirrors icmp_ping_observer in icmp_ping.h: how an in-process ping
+/// sweep reports back, on the sweeping thread.
+pub const IcmpObserver = extern struct {
+    ctx: *anyopaque,
+    pinged: *const fn (ctx: *anyopaque, index: usize, answered: c_int) callconv(.c) void,
+    stop_requested: *const fn (ctx: *anyopaque) callconv(.c) c_int,
+};
+
+pub const IcmpSweep = enum { done, unavailable };
+
+/// Ping every IP from one ICMP socket inside the process (see
+/// icmp_ping.h). `.unavailable` means nothing was sent: this system
+/// does not allow unprivileged ICMP sockets, so ping(1) has to do it.
+pub fn icmpPingSweep(ips: []const [4]u8, timeout_ms: c_int, max_in_flight: usize, observer: *const IcmpObserver) error{OutOfMemory}!IcmpSweep {
+    return switch (c.icmp_ping_sweep(ips.ptr, ips.len, timeout_ms, max_in_flight, observer)) {
+        0 => .done,
+        1 => .unavailable,
+        else => error.OutOfMemory,
     };
 }

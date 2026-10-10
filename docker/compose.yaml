@@ -12,8 +12,9 @@ services:
     image: netscanner-test
     networks:
       lantest:
-    # Without this the ping binary the --ping path shells out to fails
-    # with "Operation not permitted".
+    # ns pings through an unprivileged ICMP socket; this is for the
+    # ping binary it falls back to when that socket is refused, which
+    # otherwise fails with "Operation not permitted".
     cap_add:
       - NET_RAW
     volumes:
