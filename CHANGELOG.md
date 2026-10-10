@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- `--ping`, and the ping that confirms quiet hosts from the ARP table
+  in a default `ns -s`, now send their pings from inside `ns` instead
+  of starting a `ping` process per host, still without privileges.
+  Up to 512 pings wait for their answer at once, each for its own 1s,
+  instead of in waves of 256 that each waited for their slowest host.
+  Measured on Windows 11 (median, same machine, old and new builds
+  interleaved): `--ping` on a home /24 2.5s -> 1.0s, on an empty routed
+  /20 46.5s -> 8.0s, on an empty routed /16 710s -> 128s. The default
+  `ns -s` is unchanged (2.0s). On macOS (Wi-Fi): `--ping` on a /23
+  2.3s -> 1.1-1.3s, on an empty routed /20 18.2s -> 8.2s, with the
+  same hosts found. Pings go out at most 2 per millisecond: at 16, a
+  Wi-Fi /23 lost up to half its replies. On Linux, an on-link /20 sweeps in 13.5s
+  instead of about 20s. Where Linux does not allow unprivileged pings
+  (the user's group is outside `net.ipv4.ping_group_range`), `ns` falls
+  back to the `ping` command, as before.
+
+- Fixed: on Windows, `--ping` sometimes reported absent hosts as up.
+  Windows' `ping` succeeds when the answer is "destination host
+  unreachable" from the scanning machine itself, so a random handful of
+  empty addresses showed up in each scan (up to 5 on a /24). Only an
+  echo reply from the host itself counts now.
+
 - `ns -s` on an attached subnet now also asks the network who is there
   over multicast: one mDNS service query and one SSDP search go out as
   the TCP sweep starts, and every device in range that answers is

@@ -29,7 +29,7 @@ Inside the scanner shell:
 ```sh
 zig build && zig build test --summary all   # toolchain check
 ./zig-out/bin/ns -s 192.168.90.0/24         # expect .1, .2, .3, .4 in ~1s
-./zig-out/bin/ns -s 192.168.90.0/29 --ping  # ping fallback path
+./zig-out/bin/ns -s 192.168.90.0/29 --ping  # ICMP ping sweep
 ./zig-out/bin/ns -p 192.168.90.3 79-81      # expect port 80 open
 ```
 
@@ -53,5 +53,14 @@ docker run --rm --network nstest --cap-add=NET_RAW \
   -v "$PWD:/work" -w /work netscanner-test ./zig-out/bin/ns -s 192.168.90.0/24
 ```
 
-`--cap-add=NET_RAW` is required: without it the `ping` binary the
-`--ping` path shells out to fails with "Operation not permitted".
+`ns` pings from inside the process, through an unprivileged ICMP
+socket that Docker allows by default (`net.ipv4.ping_group_range`).
+`--cap-add=NET_RAW` is only for the `ping` binary `ns` falls back to
+when that socket is refused; without it, that binary fails with
+"Operation not permitted". To exercise the fallback, block the socket:
+
+```sh
+docker run --rm --network nstest --cap-add=NET_RAW \
+  --sysctl net.ipv4.ping_group_range="1 0" \
+  -v "$PWD:/work" -w /work netscanner-test ./zig-out/bin/ns -s 192.168.90.0/29 --ping
+```
