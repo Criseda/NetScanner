@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Port scans of distant hosts are as fast as `--timeout 500` again.
+  A host that never answers faster than 100 ms now gets one 500 ms
+  wait per port, as before #69, instead of a shorter learned wait and
+  a second try. That far away, a port that missed the learned wait was
+  nearly always a slow refusal rather than a lost packet, so the second
+  pass found nothing and only added time. The host's fastest answer
+  decides, so a nearby router slowed down by the scan itself keeps its
+  second tries. Measured on macOS against scanme.nmap.org (`1-1024`,
+  ~170 ms away, 20 runs): 1.12s -> 0.87s, level with `--timeout 500`,
+  same open ports. LAN scans are unchanged.
+
 - `--ping`, and the ping that confirms quiet hosts from the ARP table
   in a default `ns -s`, now send their pings from inside `ns` instead
   of starting a `ping` process per host, still without privileges.
