@@ -298,6 +298,11 @@ const PortScan = struct {
     /// Otherwise the wait is learned from this host's answers as the
     /// scan goes.
     estimator: rtt.RttEstimator,
+    /// The quickest answer so far, in microseconds: how far away the
+    /// host is. Load only ever slows answers down, so a busy LAN host
+    /// keeps a small one, while a distant host never gets below its
+    /// distance (see firstTry).
+    fastest_answer_us: u64 = std.math.maxInt(u64),
     open_ports: std.ArrayList(u16) = .empty,
     /// Ports a learned wait left unanswered, for their second try.
     /// The second pass then moves the ones still unanswered to the
@@ -385,10 +390,19 @@ const PortScan = struct {
     /// that stalls for a moment would miss both. Otherwise, on a slow
     /// link, the probe waits the full PORT_TIMEOUT_MS once, as a fixed
     /// timeout did. Either way no port costs more than it used to.
+    ///
+    /// A host that never answers faster than PORT_TIMEOUT_FLOOR_MS is
+    /// far away, and there a port that misses the learned wait was
+    /// nearly always slow to refuse, not lost: on scanme.nmap.org
+    /// (~170 ms away) 67-430 of 1024 ports missed it every run, nearly
+    /// all answered their second try, and that second pass cost more
+    /// than the shorter waits saved (#71). So a far host gets the full
+    /// wait too.
     fn firstTry(self: *PortScan, port: u16) PortProbe {
         if (self.fixed_ms) |ms| return self.probe(port, ms, false);
         const learned_ms = self.estimator.timeoutMs();
-        if (2 * learned_ms > PORT_TIMEOUT_MS) return self.probe(port, PORT_TIMEOUT_MS, false);
+        const far = self.fastest_answer_us > PORT_TIMEOUT_FLOOR_MS * std.time.us_per_ms;
+        if (far or 2 * learned_ms > PORT_TIMEOUT_MS) return self.probe(port, PORT_TIMEOUT_MS, false);
         return self.probe(port, learned_ms, true);
     }
 
@@ -407,7 +421,10 @@ const PortScan = struct {
     /// toward progress, open or not, and only after its `port` event,
     /// so a frontend never sees 100% before the last hit.
     pub fn done(self: *PortScan, p: PortProbe, outcome: ProbeOutcome, elapsed_us: u64) void {
-        if (outcome != .filtered) self.estimator.observe(elapsed_us);
+        if (outcome != .filtered) {
+            self.estimator.observe(elapsed_us);
+            self.fastest_answer_us = @min(self.fastest_answer_us, elapsed_us);
+        }
         const port = p.target.port;
         if (self.pass == .retry) {
             if (outcome == .filtered) {
