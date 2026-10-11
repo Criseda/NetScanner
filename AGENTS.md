@@ -36,6 +36,28 @@ selling point: any change requiring privileges does not belong here.
   (stderr) is fine. Scans take `stream_results = false` exactly so
   tests can run quietly; the streaming output is verified manually.
 
+## Performance changes
+
+- **Measure, then decide.** A speedup ships only if it measures
+  faster: `-Doptimize=ReleaseFast`, old and new interleaved in random
+  order (hyperfine runs one command's batch after the other's, so
+  network drift lands on one side), at least 10 runs each, median and
+  p90, and % change = (old - new) / old on the medians. Hosts and
+  open ports found must be the same or more.
+- **Don't tune to the test network.** One router, LAN or ISP is one
+  data point, not the target: fitting to it is overfitting, as with
+  an ML model. Prefer signals the scan observes itself (answers, round
+  trips, kernel state) over constants fitted to one device. Each PR
+  says which networks and OSes it was measured on, and which not.
+- **Think through the scans you can't measure.** Tiny ranges (`/30`),
+  far hosts, hosts that drop or rate-limit probes, every OS. A change
+  that helps one case but adds a wait to another does not ship.
+- **Keep it small.** A gain has to be worth its code. When an idea
+  needs a lot of machinery for a little time, leave it out and say
+  why in its issue.
+- **Releases** are benchmarked against the previous release on Linux,
+  macOS and Windows, and the CHANGELOG records the differences.
+
 ## Style
 
 - Human-readable first, compact never at clarity's expense. Doc
