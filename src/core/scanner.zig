@@ -1192,10 +1192,14 @@ pub fn scanNetwork(
     // Stopped before the results on the normal path; this covers errors.
     defer if (listening) listener.finish();
 
+    // Read quietly: harvestArp reads it again and says why it can't.
+    const known_before = c_bindings.dumpNeighbors(allocator);
+    defer if (known_before) |table| allocator.free(table);
+
     run.startPhase(.sweep, targets.items.len);
     sweepHosts(discovery, targets.items);
 
-    harvestArp(discovery, hosts.start, hosts.end);
+    harvestArp(discovery, hosts.start, hosts.end, known_before);
 
     // Replies stop counting here: the results are about to be sorted
     // and printed, so nothing may add to them any more.
@@ -1352,12 +1356,16 @@ const MulticastListener = struct {
 /// Read the neighbor table for in-range hosts the TCP sweep missed. The
 /// sweep's own connects make the kernel ARP every on-link address, so a
 /// quiet host that drops TCP and ICMP but answers ARP is in the table by
-/// now, marked reachable: confirmed seconds ago, it is reported at once.
-/// Any other entry is pinged once first: entries linger up to ~20min
-/// after a host leaves, so an old one alone is not proof. Needs no
-/// privileges and spawns nothing; the table is read natively
-/// (readNeighbors).
-fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
+/// now. An entry confirmed seconds ago is reported at once: one the
+/// kernel marks reachable (Linux, Windows), or one missing from
+/// `known_before`, the table as it was before the sweep, so the kernel
+/// resolved it during this scan. That is the only sign of it on macOS,
+/// whose table keeps no reachability state. Any other entry is pinged
+/// once first: entries linger up to ~20min after a host leaves, so an
+/// old one alone is not proof. Needs no privileges and spawns nothing;
+/// the table is read natively (readNeighbors). Without `known_before`
+/// (it could not be read), every entry counts as old.
+fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8, known_before: ?[]const c_bindings.Neighbor) void {
     const run = shares.run;
     // No size until the table is read: the display shows just the label.
     run.startPhase(.arp, 0);
@@ -1370,7 +1378,7 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
         if (entry.mac) |mac| shares.recordMac(entry.ip, mac);
         if (!utils.ipInRange(entry.ip, first_ip, last_ip)) continue;
         if (shares.isFound(entry.ip)) continue;
-        if (entry.state == .reachable) {
+        if (entry.state == .reachable or resolvedDuringScan(known_before, table, entry, first_ip, last_ip)) {
             shares.reportHost(entry.ip, .arp);
             continue;
         }
@@ -1457,6 +1465,40 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8) void {
         // Fallback: execute synchronously if thread spawning fails or system is single-threaded
         arp_worker(job);
     }
+}
+
+/// Whether `entry`, from `table` (read after the sweep), proves its host
+/// answered ARP during this scan: it is missing from `known_before`,
+/// the table read before the sweep, so the kernel resolved it since.
+/// False when that first read failed, and when another in-range IP has
+/// the same MAC (see sharesMac).
+pub fn resolvedDuringScan(
+    known_before: ?[]const c_bindings.Neighbor,
+    table: []const c_bindings.Neighbor,
+    entry: c_bindings.Neighbor,
+    first_ip: [4]u8,
+    last_ip: [4]u8,
+) bool {
+    const before = known_before orelse return false;
+    for (before) |old| {
+        if (std.mem.eql(u8, &old.ip, &entry.ip)) return false;
+    }
+    return !sharesMac(table, entry, first_ip, last_ip);
+}
+
+/// Whether another in-range IP in the table has `entry`'s MAC. A router
+/// doing proxy ARP answers for every address it routes, so after a
+/// sweep each of them would look newly resolved: one device answering
+/// for several addresses is no proof of any of them, and they get the
+/// ping like old entries.
+fn sharesMac(table: []const c_bindings.Neighbor, entry: c_bindings.Neighbor, first_ip: [4]u8, last_ip: [4]u8) bool {
+    const mac = entry.mac orelse return false;
+    for (table) |other| {
+        const other_mac = other.mac orelse continue;
+        if (std.mem.eql(u8, &other.ip, &entry.ip) or !utils.ipInRange(other.ip, first_ip, last_ip)) continue;
+        if (std.mem.eql(u8, &other_mac, &mac)) return true;
+    }
+    return false;
 }
 
 fn containsIp(ips: []const [4]u8, ip: [4]u8) bool {

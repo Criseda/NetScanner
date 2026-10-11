@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const scanner = @import("core").scanner;
 const progress = @import("core").progress;
+const Neighbor = @import("bindings").Neighbor;
 
 // This is a simple test to ensure the scanner module can be imported
 test "scanner module imports correctly" {
@@ -250,4 +251,37 @@ test "scanPorts shows its display only while it runs" {
     // can print its table on a clean terminal.
     try std.testing.expectEqual(@as(usize, 1), recorder.begun);
     try std.testing.expect(recorder.ended >= 1);
+}
+
+test "resolvedDuringScan trusts only entries new since the sweep began" {
+    const first: [4]u8 = .{ 192, 168, 1, 1 };
+    const last: [4]u8 = .{ 192, 168, 1, 254 };
+    const gateway: Neighbor = .{ .ip = .{ 192, 168, 1, 1 }, .mac = .{ 1, 1, 1, 1, 1, 1 }, .state = .stale };
+    const phone: Neighbor = .{ .ip = .{ 192, 168, 1, 20 }, .mac = .{ 2, 2, 2, 2, 2, 2 }, .state = .stale };
+    const before = [_]Neighbor{gateway};
+    const after = [_]Neighbor{ gateway, phone };
+
+    // Resolved during the scan: proof the phone answered ARP just now.
+    try std.testing.expect(scanner.resolvedDuringScan(&before, &after, phone, first, last));
+    // Already there before the sweep: could be left over, needs a ping.
+    try std.testing.expect(!scanner.resolvedDuringScan(&before, &after, gateway, first, last));
+    // No first read to compare with: every entry counts as old.
+    try std.testing.expect(!scanner.resolvedDuringScan(null, &after, phone, first, last));
+}
+
+test "resolvedDuringScan does not trust a MAC answering for several IPs" {
+    // A router doing proxy ARP answers for every address it routes, so
+    // after a sweep they all look newly resolved, with its MAC.
+    const first: [4]u8 = .{ 10, 0, 0, 1 };
+    const last: [4]u8 = .{ 10, 0, 0, 254 };
+    const router_mac: [6]u8 = .{ 3, 3, 3, 3, 3, 3 };
+    const a: Neighbor = .{ .ip = .{ 10, 0, 0, 5 }, .mac = router_mac, .state = .stale };
+    const b: Neighbor = .{ .ip = .{ 10, 0, 0, 6 }, .mac = router_mac, .state = .stale };
+    const elsewhere: Neighbor = .{ .ip = .{ 172, 16, 0, 1 }, .mac = router_mac, .state = .stale };
+    const before = [_]Neighbor{};
+
+    try std.testing.expect(!scanner.resolvedDuringScan(&before, &[_]Neighbor{ a, b }, a, first, last));
+    // The same MAC on an address outside the range is another interface
+    // of the same device, not proxy ARP within the scan.
+    try std.testing.expect(scanner.resolvedDuringScan(&before, &[_]Neighbor{ a, elsewhere }, a, first, last));
 }

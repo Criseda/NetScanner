@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- `ns -s` reports a quiet host at once when its ARP entry appeared
+  during the scan, instead of pinging it first (#79). The table is
+  read before the sweep too: an entry that was not there then was
+  resolved by the sweep's own connects, so the host answered ARP
+  seconds ago, which is proof enough. This matters most on macOS,
+  whose table records no reachability state, so every entry used to
+  get the confirming ping, and devices that answer ARP but drop ping
+  were never reported. Older entries still get the ping, as before
+  (#23), and so do new entries sharing a MAC with another address in
+  the range (a router doing proxy ARP answers for all of them).
+  Measured on macOS (Wi-Fi, a /23 with smart-home devices, 10
+  interleaved runs each): with the ARP table cleared before each run,
+  1.52s -> 0.52s and a median of 15 -> 18.5 hosts found (Espressif,
+  Nest and Tuya devices that drop ping); with a warm table, 1.53s
+  either way and the same hosts. Linux and Windows not measured yet.
+
 - Port scans of distant hosts are as fast as `--timeout 500` again.
   A host that never answers faster than 100 ms now gets one 500 ms
   wait per port, as before #69, instead of a shorter learned wait and
