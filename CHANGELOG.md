@@ -13,6 +13,11 @@ the same hosts and open ports found unless noted):
   1.06s -> 1.13s, as pings now go out at most 2 per millisecond; `ns
   -p` on a host that refuses closed ports, 1-1024 0.03s -> 0.04s and
   1-65535 0.08s -> 0.14s.
+- macOS (Wi-Fi, a /23 with smart-home devices): `ns -s` 3.09s ->
+  1.52s, finding a median of 39 hosts instead of 35.5; `ns -s --ping`
+  3.47s -> 1.10s, a median of 36 hosts instead of 37 (38 in all on
+  both, across a second set of runs); `ns -p` 1-1024 on the router
+  1.14s -> 0.64s.
 
 Changes:
 
