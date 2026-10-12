@@ -195,8 +195,10 @@ always last:
 
   `arp` covers the check of quiet hosts that ignored the TCP probe but
   sit in the ARP table. A host the OS confirmed seconds ago counts as
-  up at once and is not part of the phase (Linux and Windows; macOS
-  keeps no such state). Each other entry gets one ping (about 1s at
+  up at once and is not part of the phase: one the OS marks reachable
+  (Linux and Windows), or one that was not in the table before the
+  scan, so the OS resolved it during the sweep (every OS, macOS
+  included). Each other entry gets one ping (about 1s at
   most) before it counts as up. An event goes out only when the whole percentage
   changes, so a phase emits at most about 100 lines whatever its size.
   Within a phase `done` only increases, and each phase ends with exactly
