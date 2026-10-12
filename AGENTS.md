@@ -1,5 +1,8 @@
 # Working in this repo (notes for humans and agents)
 
+No-root operation is the selling point: any change requiring
+privileges does not belong here.
+
 ## Commands
 
 - `zig build` — build the `ns` binary (`zig-out/bin/`).
@@ -15,14 +18,15 @@
 Bump `.version` in `build.zig.zon` (`ns --version` reads it) and the
 version badges in `README.md` and `docs/README.md`, and turn
 `## Unreleased` in `CHANGELOG.md` into the version's section.
+Benchmark against the previous release on Linux, macOS and Windows,
+and record the differences in the CHANGELOG.
 
 ## Changelog per change
 
 This repo keeps a changelog **per change**: every user-facing change
 (new flag, changed output, fixed behavior, performance shift) gets an
 entry under `## Unreleased` in `CHANGELOG.md` in the same commit or
-PR. Create the section if it is missing. No-root operation is the
-selling point: any change requiring privileges does not belong here.
+PR. Create the section if it is missing.
 
 ## Tests
 
@@ -38,25 +42,18 @@ selling point: any change requiring privileges does not belong here.
 
 ## Performance changes
 
-- **Measure, then decide.** A speedup ships only if it measures
-  faster: `-Doptimize=ReleaseFast`, old and new interleaved in random
-  order (hyperfine runs one command's batch after the other's, so
-  network drift lands on one side), at least 10 runs each, median and
-  p90, and % change = (old - new) / old on the medians. Hosts and
-  open ports found must be the same or more.
-- **Don't tune to the test network.** One router, LAN or ISP is one
-  data point, not the target: fitting to it is overfitting, as with
-  an ML model. Prefer signals the scan observes itself (answers, round
-  trips, kernel state) over constants fitted to one device. Each PR
-  says which networks and OSes it was measured on, and which not.
-- **Think through the scans you can't measure.** Tiny ranges (`/30`),
-  far hosts, hosts that drop or rate-limit probes, every OS. A change
-  that helps one case but adds a wait to another does not ship.
-- **Keep it small.** A gain has to be worth its code. When an idea
-  needs a lot of machinery for a little time, leave it out and say
-  why in its issue.
-- **Releases** are benchmarked against the previous release on Linux,
-  macOS and Windows, and the CHANGELOG records the differences.
+- A speedup ships only if it measures faster and finds the same or
+  more hosts and open ports. Compare ReleaseFast builds, old and new
+  interleaved in random order (not hyperfine: it runs one side's batch
+  after the other's, so network drift lands on one side), 10+ runs
+  each, medians and p90.
+- Your network is one data point. Prefer signals the scan observes
+  (answers, round trips, kernel state) over constants fitted to one
+  router. Say in the PR which networks and OSes were measured and
+  which weren't, and reason through the rest: tiny ranges, far hosts,
+  hosts that drop or rate-limit probes. A change that helps one case
+  and adds a wait to another does not ship.
+- A gain has to be worth its code.
 
 ## Style
 
