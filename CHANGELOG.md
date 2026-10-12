@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## v1.6.0
+
+Faster scans on every OS, and more of the quiet devices found.
+Compared with v1.5.0 (ReleaseFast, 10 interleaved runs each, medians;
+the same hosts and open ports found unless noted):
+
+- Windows 11 (wired home /24): `ns -s` 6.95s -> 0.61s; `ns -s --ping`
+  1.98s -> 0.85s, now with the 8 real hosts every run (v1.5.0
+  reported 8 to 166); `ns -p` 1-1024 on the router 2.14s -> 0.93s.
+- Linux (Docker lab /24): `ns -s` 2.09s -> 0.55s; `ns -s --ping`
+  1.06s -> 1.13s, as pings now go out at most 2 per millisecond; `ns
+  -p` on a host that refuses closed ports, 1-1024 0.03s -> 0.04s and
+  1-65535 0.08s -> 0.14s.
+
+Changes:
 
 - `ns -s` reports a quiet host at once when its ARP entry appeared
   during the scan, instead of pinging it first (#79). The table is
@@ -16,7 +30,8 @@
   interleaved runs each): with the ARP table cleared before each run,
   1.52s -> 0.52s and a median of 15 -> 18.5 hosts found (Espressif,
   Nest and Tuya devices that drop ping); with a warm table, 1.53s
-  either way and the same hosts. Linux and Windows not measured yet.
+  either way and the same hosts. Linux and Windows already reported
+  these entries at once as reachable, and measure the same as before.
 
 - Port scans of distant hosts are as fast as `--timeout 500` again.
   A host that never answers faster than 100 ms now gets one 500 ms
