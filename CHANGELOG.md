@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## v1.7.0
+
+MAC addresses, manufacturers and quiet hosts for apps that run `ns`
+on macOS, through a new `--neighbor-table=parent` flag. Nothing
+changes without the flag: compared with v1.6.0 on macOS (Wi-Fi /24,
+ReleaseFast, 10 interleaved runs each), `ns -s --json` took a median
+of 0.52s either way and found as many hosts within Wi-Fi noise
+(medians 38 and 37, every run 33-39). Linux and Windows were not benchmarked: the
+change adds no work to their scans either.
+
+Changes:
 
 - `ns -s --json --neighbor-table=parent` asks the app that runs `ns`
   for the ARP table instead of reading it: `ns` prints a
