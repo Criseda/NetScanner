@@ -49,6 +49,9 @@ ns --version                              # Display version
 - `--vendor`: Resolves MAC addresses and hardware manufacturers only.
 - `--oui-file <path>`: Load an external Wireshark `manuf` or IEEE OUI database file.
 - `--ping`: Uses ICMP ping sweep instead of TCP plus ARP.
+- `--neighbor-table=parent`: For apps that run `ns`: ask the parent
+  process for the ARP table instead of reading it (needs `--json`; see
+  [below](#neighbor-table-from-the-parent---neighbor-tableparent)).
 
 When `--resolve`, `--hostname`, or `--vendor` is passed, results are formatted into an aligned table:
 
@@ -212,6 +215,43 @@ always last:
 
 In both modes, invalid input exits with status 1 and a successful scan
 (even one that finds nothing) exits with 0.
+
+#### Neighbor table from the parent (`--neighbor-table=parent`)
+
+For apps that run `ns`: MAC addresses, manufacturers and the quiet
+hosts of the `arp` phase all come from the OS's neighbor (ARP) table.
+macOS hides that table from a program started by an app that is not
+Developer ID signed, while the app itself can still read it. With
+`ns -s ... --json --neighbor-table=parent`, `ns` asks its parent for
+the table instead of reading it, and handles the answer exactly as it
+would its own read: which entries prove a host, the confirming pings
+and the manufacturer lookup all stay in `ns`.
+
+Each time `ns` needs the table (before and after the sweep; once after
+`--ping` sweeps) it prints a request on stdout and waits for one line
+on stdin:
+
+```text
+ns  -> {"type":"neighbors_request","id":1}
+app <- {"type":"neighbors","id":1,"entries":[{"ip":"192.168.1.1","mac":"aa:bb:cc:dd:ee:ff","state":"stale"}]}
+```
+
+- `id` counts up from 1; the reply carries the request's `id`.
+- `entries` is the IPv4 table as read, in any order. `mac` (`:` or `-`
+  separated) and `state` may be left out or `null`. `state` is
+  `reachable` when the OS confirmed the entry within the last few
+  seconds and `stale` otherwise; macOS keeps no such state, so send
+  `stale` (or nothing) there. Unreadable entries, multicast addresses
+  and broadcast MACs are skipped, so the table can be sent unfiltered.
+- A parent that cannot read the table answers
+  `{"type":"neighbors","id":1,"error":"..."}`, and `ns` reads it
+  itself, as without the flag. So it does when no answer comes within
+  2 seconds or stdin closes, and then it stops asking for the rest of
+  the scan.
+
+The flag needs `--json`, and is not available on Windows, which never
+hides the table. `--neighbor-table=kernel`, the default, reads it
+directly.
 
 ## Installation
 

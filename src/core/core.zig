@@ -9,3 +9,4 @@ pub const rtt = @import("rtt.zig");
 pub const connects = @import("connects.zig");
 pub const live = @import("live.zig");
 pub const multicast = @import("multicast.zig");
+pub const neighbor_table = @import("neighbor_table.zig");

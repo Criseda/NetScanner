@@ -35,6 +35,7 @@ pub fn printUsage(io: std.Io) !void {
         \\  --vendor                    Lookup MAC addresses and hardware manufacturers
         \\  --oui-file <path>           Load custom Wireshark or IEEE OUI database file
         \\  --ping                      Use ICMP ping sweep instead of TCP + ARP
+        \\  --neighbor-table=parent     Ask the parent app for the ARP table (needs --json)
         \\
         \\PORT OPTIONS (-p):
         \\  --timeout <ms>              Fixed probe timeout in ms (default: learned, 100-500)

@@ -19,6 +19,7 @@ const progress = @import("progress.zig");
 const rtt = @import("rtt.zig");
 const multicast = @import("multicast.zig");
 const connects = @import("connects.zig");
+const neighbor_table = @import("neighbor_table.zig");
 
 /// Cap for one discovery connect attempt, in milliseconds. Bounds
 /// discovery probes, so filtered hosts cost little.
@@ -100,6 +101,9 @@ const Run = struct {
     json: bool,
     display: ?progress.Display,
     cancel: ?*const std.atomic.Value(bool),
+    /// Asked for the neighbor table instead of the kernel
+    /// (`--neighbor-table=parent`); null reads it directly.
+    neighbor_parent: ?*neighbor_table.Parent,
 
     /// For either options struct: both name these fields the same.
     /// `own_tracker` counts when the caller passes no tracker of its own.
@@ -119,6 +123,7 @@ const Run = struct {
             .json = options.json,
             .display = options.display,
             .cancel = options.cancel,
+            .neighbor_parent = if (@hasField(@TypeOf(options), "neighbor_parent")) options.neighbor_parent else null,
         };
     }
 
@@ -516,6 +521,10 @@ pub const NetworkScanOptions = struct {
     /// Set (from a Ctrl+C handler, say) to stop early: worker pools
     /// take no new work, and the hosts found so far are reported.
     cancel: ?*const std.atomic.Value(bool) = null,
+    /// Ask this parent process for the neighbor table instead of
+    /// reading it (`--neighbor-table=parent`, see neighbor_table.zig).
+    /// Needs `json`: the request goes out as an event on stdout.
+    neighbor_parent: ?*neighbor_table.Parent = null,
 };
 
 /// State shared by every worker of a discovery sweep. It lives on the
@@ -1118,7 +1127,7 @@ pub fn scanNetworkPing(
     allocator.free(alive);
 
     // MACs for --vendor; the ping sweep confirmed every host itself.
-    if (readNeighbors(allocator)) |table| {
+    if (readNeighbors(run, .{})) |table| {
         defer allocator.free(table);
         for (table) |entry| {
             if (entry.mac) |mac| discovery.recordMac(entry.ip, mac);
@@ -1193,7 +1202,7 @@ pub fn scanNetwork(
     defer if (listening) listener.finish();
 
     // Read quietly: harvestArp reads it again and says why it can't.
-    const known_before = c_bindings.dumpNeighbors(allocator);
+    const known_before = readNeighbors(run, .{ .quiet = true });
     defer if (known_before) |table| allocator.free(table);
 
     run.startPhase(.sweep, targets.items.len);
@@ -1369,7 +1378,7 @@ fn harvestArp(shares: Discovery, first_ip: [4]u8, last_ip: [4]u8, known_before: 
     const run = shares.run;
     // No size until the table is read: the display shows just the label.
     run.startPhase(.arp, 0);
-    const table = readNeighbors(run.allocator) orelse return;
+    const table = readNeighbors(run, .{}) orelse return;
     defer run.allocator.free(table);
 
     var candidates: std.ArrayList([4]u8) = .empty;
@@ -1510,21 +1519,28 @@ fn containsIp(ips: []const [4]u8, ip: [4]u8) bool {
 
 /// The kernel's IPv4 neighbor table, read natively (see neighbors.h):
 /// no `arp -a` or `ip neigh` to spawn, no localized text to parse, and
-/// no net-tools needed on Linux. Null when it cannot be read; then
-/// discovery just ends after the TCP sweep.
+/// no net-tools needed on Linux. With `--neighbor-table=parent` the
+/// parent process is asked for it first (neighbor_table.zig), and the
+/// table is read directly only when the parent gives no answer. Null
+/// when it cannot be read; then discovery just ends after the TCP
+/// sweep. `quiet` leaves out the reasons on stderr, for a read that
+/// another one repeats later.
 ///
 /// macOS 27 hides the table unless `ns` is codesigned with a
 /// reverse-DNS identifier (build.zig does that) and has a shell, not
 /// another third-party program, as its parent.
-pub fn readNeighbors(allocator: std.mem.Allocator) ?[]c_bindings.Neighbor {
-    const table = c_bindings.dumpNeighbors(allocator) orelse {
-        std.debug.print("arp harvest skipped: cannot read the neighbor table\n", .{});
+fn readNeighbors(run: Run, options: struct { quiet: bool = false }) ?[]c_bindings.Neighbor {
+    if (run.neighbor_parent) |parent| {
+        if (parent.request(run.allocator, run.io, run.stdout_mutex)) |table| return table;
+    }
+    const table = c_bindings.dumpNeighbors(run.allocator) orelse {
+        if (!options.quiet) std.debug.print("arp harvest skipped: cannot read the neighbor table\n", .{});
         return null;
     };
     // A LAN host always has at least its gateway in the table, so empty
     // means macOS filtered it: say why the MAC column and quiet-host
     // harvest will be blank instead of failing silently.
-    if (builtin.os.tag == .macos and table.len == 0) {
+    if (builtin.os.tag == .macos and table.len == 0 and !options.quiet) {
         std.debug.print("arp table is empty: macOS hides it unless ns is codesigned with an " ++
             "identifier (`zig build` on a Mac does this) and launched directly from a shell; " ++
             "MAC addresses, manufacturers and quiet hosts will be missing\n", .{});

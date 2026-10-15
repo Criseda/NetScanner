@@ -12,4 +12,5 @@ test {
     _ = @import("connects_test.zig");
     _ = @import("live_test.zig");
     _ = @import("multicast_test.zig");
+    _ = @import("neighbor_table_test.zig");
 }
