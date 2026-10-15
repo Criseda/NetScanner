@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `ns -s --json --neighbor-table=parent` asks the app that runs `ns`
+  for the ARP table instead of reading it: `ns` prints a
+  `neighbors_request` event and reads the app's `neighbors` reply on
+  stdin (see "Neighbor table from the parent" in docs/README.md).
+  macOS hides the table from programs started by apps that are not
+  Developer ID signed, but the app itself can read it, so with this
+  NetScanner for macOS gets MAC addresses, manufacturers and the quiet
+  hosts of the ARP harvest. Without an answer within 2 seconds, `ns`
+  reads the table itself as before. Without the flag nothing changes.
+
 ## v1.6.0
 
 Faster scans on every OS, and more of the quiet devices found.

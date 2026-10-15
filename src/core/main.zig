@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
 const ports = @import("ports.zig");
 const progress = @import("progress.zig");
 const interrupt = @import("interrupt.zig");
+const neighbor_table = @import("neighbor_table.zig");
 const live_status = @import("live.zig");
 const Live = live_status.Live;
 
@@ -216,7 +218,7 @@ fn printPortTable(io: std.Io, stdout_mutex: *std.Io.Mutex, open_ports: []const u
 
 /// `ns -s <subnet> [options]`: find live hosts. Fast TCP + ARP discovery
 /// by default, one-ping-per-host with --ping. Optional --resolve,
-/// --hostname, --vendor, --oui-file and --json.
+/// --hostname, --vendor, --oui-file, --json and --neighbor-table.
 fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, args: []const [:0]const u8, json: bool) !void {
     if (args.len < 3) {
         if (json) fail(io, json, "Usage: ns -s <subnet>", .{});
@@ -226,6 +228,8 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.proce
     const cidr = args[2];
     var use_ping = false;
     var scan_options = scanner.NetworkScanOptions{ .json = json };
+    var neighbor_parent: neighbor_table.Parent = .{};
+    defer neighbor_parent.deinit(allocator);
 
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
@@ -246,6 +250,20 @@ fn runSubnetScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.proce
             if (i >= args.len) fail(io, json, "--oui-file requires a file path", .{});
             scan_options.oui_file = args[i];
             scan_options.resolve_vendor = true;
+        } else if (std.mem.startsWith(u8, arg, "--neighbor-table=")) {
+            // For apps that run `ns` and can read the table when `ns`
+            // cannot (macOS; see neighbor_table.zig). "kernel" is the
+            // default, accepted so callers can always pass the flag.
+            const source = arg["--neighbor-table=".len..];
+            if (std.mem.eql(u8, source, "parent")) {
+                if (!json) fail(io, json, "--neighbor-table=parent needs --json", .{});
+                if (builtin.os.tag == .windows) fail(io, json, "--neighbor-table=parent is not supported on Windows", .{});
+                scan_options.neighbor_parent = &neighbor_parent;
+            } else if (std.mem.eql(u8, source, "kernel")) {
+                scan_options.neighbor_parent = null;
+            } else {
+                fail(io, json, "--neighbor-table must be 'kernel' or 'parent'", .{});
+            }
         } else {
             if (!json) try utils.printUsage(io);
             fail(io, json, "Unknown option '{s}'", .{arg});
