@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- `ns -p` tries common services first: the ports its port table
+  names (the curated list of services people meet on a LAN, 110 in
+  all), then the rest of the range, each in port order. Some hosts
+  rate-limit SYNs and answer only the first dozen or so of a burst; a
+  home router's open DNS port 53 was lost in every scan when probed
+  53rd, as port order had it, while nmap, which also tries common
+  ports first, found it. Same probes, same pace, so no slowdown.
+  Windows 11, wired, ReleaseFast, old and new interleaved in random
+  order, 5 s of quiet before each run, medians (p90):
+  - router 1-1024: 0.886s (0.897s) -> 0.888s (0.899s), port 53 found
+    in 12 of 12 runs instead of 0 of 12; 80 and 443 in all.
+  - router 1-100: 0.652s (0.660s) -> 0.547s (0.657s), both arms
+    bimodal at 0.54 and 0.66s; 53 found in 9 of 10 instead of 0.
+  - router 1-65535: 15.02s (15.28s) -> 14.84s (15.15s); 53 found in 5
+    of 10 instead of 0. The router stays touchy for a while after a
+    full-range scan: 20 s after one, 1-65535 found it in 3 of 4 and
+    1-1024 in 2 of 3.
+  - scanme.nmap.org 1-1024 (4 runs each): 0.724s -> 0.711s, 22 and 80
+    every run. Home /24 discovery (`ns -s`, path unchanged): 0.560s
+    -> 0.566s, 12 hosts every run.
+  Linux and macOS were not measured: the change only reorders the
+  ports a scan already tries, the same on every OS. `port` events
+  now come in that order; the closing table and the JSON summary's
+  `open_ports` stay sorted.
+
 ## v1.7.0
 
 MAC addresses, manufacturers and quiet hosts for apps that run `ns`

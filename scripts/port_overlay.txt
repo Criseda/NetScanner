@@ -12,8 +12,10 @@
 #
 # Only add ports people actually meet on a LAN. When a port is commonly
 # used for something other than its IANA assignment, say so in the
-# description; the IANA name is still reported next to it. After editing,
-# run `python scripts/generate_ports.py` and commit both files.
+# description; the IANA name is still reported next to it. Port scans
+# also try the ports listed here first, while a host that rate-limits
+# SYNs still answers. After editing, run `python scripts/generate_ports.py`
+# and commit both files.
 
 # Web
 80    | HTTP                 | web       |             |

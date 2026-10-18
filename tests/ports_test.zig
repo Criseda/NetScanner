@@ -78,3 +78,24 @@ test "table is sorted, unique, and uses only documented categories" {
         }
     }
 }
+
+test "common services are the curated ports" {
+    // Curated with a category, curated without one, IANA-only, unknown.
+    try std.testing.expect(ports.isCommon(53));
+    try std.testing.expect(ports.isCommon(62078));
+    try std.testing.expect(!ports.isCommon(1));
+    try std.testing.expect(!ports.isCommon(0));
+    try std.testing.expect(!ports.isCommon(65534));
+}
+
+test "firstIndexFrom starts a walk at the first port in range" {
+    try std.testing.expectEqual(@as(usize, 0), ports.firstIndexFrom(0));
+    try std.testing.expectEqual(@as(u16, 22), ports.portAt(ports.firstIndexFrom(22)));
+    // 65534 is unknown, so the walk starts past it, at 65535 or the end.
+    const index = ports.firstIndexFrom(65534);
+    if (index < ports.EMBEDDED_COUNT) try std.testing.expect(ports.portAt(index) > 65534);
+    for (0..ports.EMBEDDED_COUNT) |i| {
+        try std.testing.expectEqual(i, ports.firstIndexFrom(ports.portAt(i)));
+        try std.testing.expectEqual(ports.isCommonAt(i), ports.isCommon(ports.portAt(i)));
+    }
+}

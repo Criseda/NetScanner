@@ -214,12 +214,13 @@ pub const ScanOptions = struct {
 ///
 /// Many connects stay in flight at once (connects.run), as many as the
 /// host keeps answering promptly: no thread per port, no sleeps, no
-/// per-port stderr. A second pass then retries the ports a learned
-/// wait left unanswered, and a third the ones still silent when the
-/// second showed the host had been losing probes (see
-/// PortScan.needsThirdPass). Only open ports print, and
-/// only when options.stream_results is set; closed and filtered both
-/// mean "not open" and stay silent either way.
+/// per-port stderr. Common services go first (see
+/// PortScan.nextFirstPort). A second pass then retries the ports a
+/// learned wait left unanswered, and a third the ones still silent
+/// when the second showed the host had been losing probes (see
+/// PortScan.needsThirdPass). Only open ports print, and only when
+/// options.stream_results is set; closed and filtered both mean "not
+/// open" and stay silent either way.
 pub fn scanPorts(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -238,6 +239,7 @@ pub fn scanPorts(
     var scan: PortScan = .{
         .run = run,
         .ip = ip_address,
+        .next_common = ports.firstIndexFrom(start_port),
         .next_port = start_port,
         .end = end_port,
         .fixed_ms = options.timeout_ms,
@@ -295,7 +297,11 @@ const PortScan = struct {
     run: Run,
     ip: [4]u8,
     pass: enum { first, retry, third } = .first,
-    /// The next port the first pass tries; past `end` once it is done.
+    /// The first pass tries the range's common ports first (see
+    /// nextFirstPort): this is the next port table entry it looks at.
+    next_common: usize,
+    /// Then every other port: the next one it tries; past `end` once
+    /// the first pass is done.
     next_port: u32,
     end: u32,
     /// `--timeout`: the same wait for every probe, and no retry pass.
@@ -331,12 +337,7 @@ const PortScan = struct {
     pub fn next(self: *PortScan) ?PortProbe {
         if (self.run.stopRequested()) return null;
         switch (self.pass) {
-            .first => {
-                if (self.next_port > self.end) return null;
-                const port: u16 = @intCast(self.next_port);
-                self.next_port += 1;
-                return self.firstTry(port);
-            },
+            .first => return self.firstTry(self.nextFirstPort() orelse return null),
             .retry => {
                 if (self.next_retry >= self.retries.items.len) return null;
                 const deferred = self.retries.items[self.next_retry];
@@ -357,6 +358,44 @@ const PortScan = struct {
                 return self.probe(deferred.port, self.estimator.timeoutMs(), false);
             },
         }
+    }
+
+    /// The first pass's next port: the range's common services (see
+    /// ports.isCommonAt), then all the rest, each in ascending order.
+    /// Null once the range is done.
+    ///
+    /// A scan opens with a burst of a few hundred SYNs, and some hosts
+    /// rate-limit SYNs: they answer the first few of a burst and drop
+    /// the rest. A home router answered its open DNS port 53 after up
+    /// to 15 SYNs to closed ports, but not after 20 or more, nor to its
+    /// own retransmits, until it had been left alone for a while: 100
+    /// ms after 52 SYNs, 0.5 s after a 1-1024 scan. Its web ports
+    /// answered regardless, and its closed ports were silent either
+    /// way, so nothing a scan sees tells the lost open port from them;
+    /// staying under that limit would take some 10 probes a second,
+    /// against the 2000 a second ns makes. In port order 53 went out
+    /// 53rd, and no run found it, while nmap, which also tries common
+    /// ports first, found it in 17 of 20; 6th, it was found every
+    /// time. So the first probes, the ones a host is surest to answer,
+    /// go to the ports most likely to be open. The order costs
+    /// nothing: the same ports are tried, as fast.
+    fn nextFirstPort(self: *PortScan) ?u16 {
+        while (self.next_common < ports.EMBEDDED_COUNT) {
+            const index = self.next_common;
+            self.next_common += 1;
+            const port = ports.portAt(index);
+            if (port > self.end) {
+                self.next_common = ports.EMBEDDED_COUNT;
+                break;
+            }
+            if (ports.isCommonAt(index)) return port;
+        }
+        while (self.next_port <= self.end) {
+            const port: u16 = @intCast(self.next_port);
+            self.next_port += 1;
+            if (!ports.isCommon(port)) return port;
+        }
+        return null;
     }
 
     /// Least second tries answered before a scan counts its first pass

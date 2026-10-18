@@ -55,6 +55,32 @@ pub fn portAt(index: usize) u16 {
     return std.mem.readInt(u16, db.record(index)[0..2], .little);
 }
 
+/// The index of the first entry whose port is `port` or above, or
+/// EMBEDDED_COUNT when there is none: where a walk over a range starts.
+pub fn firstIndexFrom(port: u16) usize {
+    var low: usize = 0;
+    var high: usize = db.entry_count;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (portAt(mid) < port) low = mid + 1 else high = mid;
+    }
+    return low;
+}
+
+/// Whether entry `index` is a common service: one the curated overlay
+/// lists (scripts/port_overlay.txt), the ports people actually meet on
+/// a LAN. Only those carry a label or a category of their own.
+pub fn isCommonAt(index: usize) bool {
+    const record = db.record(index);
+    return poolString(record[4..8]) != null or poolString(record[16..20]) != null;
+}
+
+/// Whether `port` is a common service (see isCommonAt).
+pub fn isCommon(port: u16) bool {
+    const index = firstIndexFrom(port);
+    return index < db.entry_count and portAt(index) == port and isCommonAt(index);
+}
+
 fn decode(record: []const u8) ?Service {
     const label = poolString(record[4..8]);
     const iana = poolString(record[8..12]);

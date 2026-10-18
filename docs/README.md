@@ -169,8 +169,9 @@ always last:
 - `host_detail` lines appear only with `--resolve`, `--hostname` or
   `--vendor`, one per host, after the sweep. Only requested fields are
   present; unresolved ones are `null`.
-- Port scans stream one `port` event per open port and end with
-  `{"type":"summary","open_ports":[22,3389],"elapsed_ms":512}`:
+- Port scans stream one `port` event per open port, in the order they
+  are found (common services are tried first), and end with
+  `{"type":"summary","open_ports":[22,3389],"elapsed_ms":512}`, sorted:
 
   ```text
   {"type":"port","port":22,"service":"SSH","iana":"ssh","description":"The Secure Shell (SSH) Protocol","category":"remote"}
