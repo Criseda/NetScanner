@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="416" viewBox="0 0 820 416" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" role="img" aria-labelledby="t d">
+<title id="t">NetScanner vs nmap, median wall time</title>
+<desc id="d">Host discovery, home /24: ns 1.18 s, nmap 22.5 s; Router, ports 1-1024: ns 0.88 s, nmap 46.6 s; Router, ports 1-65535: ns 14.9 s, nmap 48.4 min; scanme.nmap.org, ports 1-1024 (150 ms away): ns 0.75 s, nmap 85.6 s</desc>
+<text x="24" y="26" font-size="16" font-weight="600" fill="#1f2328">Median wall time, shorter is faster</text>
+<text x="24" y="46" font-size="12" fill="#59636e">Windows 11, wired home LAN, no admin rights for either tool. Each panel has its own scale.</text>
+<rect x="24" y="58" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="40" y="67" font-size="12" fill="#59636e">ns v1.6.0</text>
+<rect x="123.4" y="58" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="139.4" y="67" font-size="12" fill="#59636e">nmap 7.92 -sT (unprivileged)</text>
+<text x="24" y="94" font-size="13" font-weight="600" fill="#1f2328">Host discovery, home /24</text>
+<text x="796" y="94" font-size="13" font-weight="600" fill="#1f2328" text-anchor="end">19× faster</text>
+<text x="24" y="114" font-size="12" fill="#59636e">ns</text>
+<path d="M94 102h21.68446741951945a4 4 0 0 1 4 4v8a4 4 0 0 1 -4 4h-21.68446741951945z" fill="#2a78d6"/>
+<text x="127.68446741951945" y="114" font-size="12" fill="#1f2328">1.18 s <tspan fill="#59636e">· 11-12 hosts</tspan></text>
+<text x="24" y="132" font-size="12" fill="#59636e">nmap -sn</text>
+<path d="M94 120h488a4 4 0 0 1 4 4v8a4 4 0 0 1 -4 4h-488z" fill="#eb6834"/>
+<text x="594" y="132" font-size="12" fill="#1f2328">22.5 s <tspan fill="#59636e">· 5 hosts</tspan></text>
+<line x1="94" x2="94" y1="100" y2="138" stroke="#d1d9e0"/>
+<text x="24" y="178" font-size="13" font-weight="600" fill="#1f2328">Router, ports 1-1024</text>
+<text x="796" y="178" font-size="13" font-weight="600" fill="#1f2328" text-anchor="end">53× faster</text>
+<text x="24" y="198" font-size="12" fill="#59636e">ns</text>
+<path d="M94 186h5.31460155621143a4 4 0 0 1 4 4v8a4 4 0 0 1 -4 4h-5.31460155621143z" fill="#2a78d6"/>
+<text x="111.31460155621143" y="198" font-size="12" fill="#1f2328">0.88 s <tspan fill="#59636e">· 2 open</tspan></text>
+<text x="24" y="216" font-size="12" fill="#59636e">nmap -T4</text>
+<path d="M94 204h488a4 4 0 0 1 4 4v8a4 4 0 0 1 -4 4h-488z" fill="#eb6834"/>
+<text x="594" y="216" font-size="12" fill="#1f2328">46.6 s <tspan fill="#59636e">· 2-3 open</tspan></text>
+<line x1="94" x2="94" y1="184" y2="222" stroke="#d1d9e0"/>
+<text x="24" y="262" font-size="13" font-weight="600" fill="#1f2328">Router, ports 1-65535</text>
+<text x="796" y="262" font-size="13" font-weight="600" fill="#1f2328" text-anchor="end">195× faster</text>
+<text x="24" y="282" font-size="12" fill="#59636e">ns</text>
+<path d="M94 270h1.5a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1 -1.5 1.5h-1.5z" fill="#2a78d6"/>
+<text x="105" y="282" font-size="12" fill="#1f2328">14.9 s <tspan fill="#59636e">· 2 open</tspan></text>
+<text x="24" y="300" font-size="12" fill="#59636e">nmap -T4</text>
+<path d="M94 288h488a4 4 0 0 1 4 4v8a4 4 0 0 1 -4 4h-488z" fill="#eb6834"/>
+<text x="594" y="300" font-size="12" fill="#1f2328">48.4 min <tspan fill="#59636e">· 2 open, 1 run</tspan></text>
+<line x1="94" x2="94" y1="268" y2="306" stroke="#d1d9e0"/>
+<text x="24" y="346" font-size="13" font-weight="600" fill="#1f2328">scanme.nmap.org, ports 1-1024 (150 ms away)</text>
+<text x="796" y="346" font-size="13" font-weight="600" fill="#1f2328" text-anchor="end">115× faster</text>
+<text x="24" y="366" font-size="12" fill="#59636e">ns</text>
+<path d="M94 354h2.14367816091954a2.14367816091954 2.14367816091954 0 0 1 2.14367816091954 2.14367816091954v11.71264367816092a2.14367816091954 2.14367816091954 0 0 1 -2.14367816091954 2.14367816091954h-2.14367816091954z" fill="#2a78d6"/>
+<text x="106.28735632183908" y="366" font-size="12" fill="#1f2328">0.75 s <tspan fill="#59636e">· 2 open</tspan></text>
+<text x="24" y="384" font-size="12" fill="#59636e">nmap -T4</text>
+<path d="M94 372h488a4 4 0 0 1 4 4v8a4 4 0 0 1 -4 4h-488z" fill="#eb6834"/>
+<text x="594" y="384" font-size="12" fill="#1f2328">85.6 s <tspan fill="#59636e">· 2 open</tspan></text>
+<line x1="94" x2="94" y1="352" y2="390" stroke="#d1d9e0"/>
+</svg>

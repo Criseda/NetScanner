@@ -18,6 +18,36 @@ far. Piped output streams each host as it is found instead. Either
 way, a sorted recap with a host count and elapsed time closes the
 scan.
 
+## Speed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/ns-vs-nmap-dark.svg">
+  <img alt="Median wall time, ns vs nmap: host discovery 1.18 s vs 22.5 s, router ports 1-1024 0.88 s vs 46.6 s, router ports 1-65535 14.9 s vs 48.4 min, scanme.nmap.org ports 1-1024 0.75 s vs 85.6 s" src="docs/assets/ns-vs-nmap-light.svg">
+</picture>
+
+Measured against nmap 7.92 on the same targets, with no admin rights
+for either tool, so nmap scans with TCP `connect()` just as `ns` does.
+Windows 11, wired to a home router that drops probes to closed ports.
+Every case ran 10 times per tool in random order; nmap ran 3 times
+against scanme.nmap.org and once on the full port range.
+
+| Case | `ns` | nmap | Found |
+|---|---|---|---|
+| Host discovery, home /24 | 1.18 s | 22.5 s (`-sn`) | `ns` 11-12 hosts, nmap 5 |
+| Router, ports 1-1024 | 0.88 s | 46.6 s (`-sT -T4`) | `ns` 2 open, nmap 2-3 |
+| Router, ports 1-65535 | 14.9 s | 48.4 min (`-sT -T4`) | 2 open each |
+| scanme.nmap.org, ports 1-1024 | 0.75 s | 85.6 s (`-sT -T4`) | 2 open each |
+
+Unprivileged nmap discovers hosts only by trying TCP ports 80 and 443,
+so it misses phones, TVs and smart-home devices that `ns` finds
+through mDNS, SSDP and the ARP table. nmap did find one port `ns` did
+not: the router's DNS port (TCP 53), in 17 of its 20 runs on ports
+1-1024. The router drops some SYNs to that port, and `ns` gives up on
+a silent port after two tries. nmap with admin rights (SYN scan, ARP
+discovery) is faster than shown here and was not measured. Commands,
+p90s and the rest of the method are in
+[docs/benchmarks.md](docs/benchmarks.md).
+
 ## Install
 
 Requires [Zig](https://ziglang.org/) 0.17.0 (see
@@ -77,6 +107,8 @@ no scanning logic of their own:
   test commands, release builds and notes on each discovery mode.
 - [docker/README.md](docker/README.md) describes the Linux test lab, a virtual LAN you
   can scan without owning a Linux box.
+- [docs/benchmarks.md](docs/benchmarks.md) compares `ns` with nmap:
+  commands, medians, p90s and what each tool found.
 
 ## License
 
