@@ -61,6 +61,16 @@ IP               HOSTNAME                  MAC                MANUFACTURER
 192.168.1.140    game-console              fc:ca:40:77:88:99  Sony Interactive Entertainment Inc.
 ```
 
+## Apps
+
+Prefer a window to a terminal? Two apps wrap the same `ns` engine, with
+no scanning logic of their own:
+
+- [NetScannerDesktop](https://github.com/Criseda/NetScannerDesktop) for
+  Windows (WinUI 3).
+- [NetScanner for macOS](https://github.com/Criseda/NetScanner-MacOS)
+  (SwiftUI, macOS 26 and later).
+
 ## Docs
 
 - [docs/README.md](docs/README.md) has the full guide: install options, build and

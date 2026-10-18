@@ -18,8 +18,9 @@ file is the full guide.
 5. [Release builds](#release-builds)
 6. [Lookup data](#lookup-data)
 7. [Linux test lab](#linux-test-lab)
-8. [Branches](#branches)
-9. [License](#license)
+8. [Desktop apps](#desktop-apps)
+9. [Branches](#branches)
+10. [License](#license)
 
 ## Usage
 
@@ -145,7 +146,7 @@ runners use), where the line cannot be drawn.
 ### Machine-readable output (`--json`)
 
 Add `--json` to `-s` or `-p` for one JSON object per line on stdout
-(NDJSON), for scripts and frontends such as NetScannerDesktop. Every
+(NDJSON), for scripts and frontends such as the [desktop apps](#desktop-apps). Every
 line has a `type`; events stream as they happen, and `summary` is
 always last:
 
@@ -280,6 +281,21 @@ regenerated `.bin` together with any overlay change.
 `docker/README.md` describes a virtual LAN for testing on Linux
 without owning a Linux box. Windows and macOS cannot be
 containerized, so those are tested on real hosts directly.
+
+## Desktop apps
+
+Two graphical apps, each in its own repository, run the `ns` engine
+(through [`--json`](#machine-readable-output---json)) and show its
+results in a native window. They hold no scanning logic, so every scan
+speed-up and discovery fix in `ns` reaches them on their next release.
+
+| App | Platform | Install |
+| --- | --- | --- |
+| [NetScannerDesktop](https://github.com/Criseda/NetScannerDesktop) | Windows 10 1809+ and Windows 11 (WinUI 3) | Installer or portable zip from [Releases](https://github.com/Criseda/NetScannerDesktop/releases) |
+| [NetScanner for macOS](https://github.com/Criseda/NetScanner-MacOS) | macOS 26 and later (SwiftUI) | `brew install --cask criseda/tap/netscanner-app`, or the zip from [Releases](https://github.com/Criseda/NetScanner-MacOS/releases) |
+
+Bugs in the apps belong in their own repositories; bugs in what `ns`
+finds or prints belong here.
 
 ## Branches
 
