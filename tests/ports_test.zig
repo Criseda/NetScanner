@@ -78,3 +78,26 @@ test "table is sorted, unique, and uses only documented categories" {
         }
     }
 }
+
+test "ranks run 1..N in by_rank order" {
+    // Every ranked entry is in by_rank at its rank, and nothing else
+    // is, so a scan's first pass tries each ranked port exactly once.
+    // (Runtime-known, or an empty table could not compile the index.)
+    var by_rank: []const u16 = ports.by_rank;
+    _ = &by_rank;
+    var ranked: usize = 0;
+    for (0..ports.EMBEDDED_COUNT) |i| {
+        const rank = ports.rankAt(i);
+        if (rank == 0) continue;
+        ranked += 1;
+        try std.testing.expectEqual(ports.portAt(i), by_rank[rank - 1]);
+        try std.testing.expectEqual(rank, ports.rank(ports.portAt(i)));
+    }
+    try std.testing.expectEqual(by_rank.len, ranked);
+}
+
+test "ports the table does not know are unranked" {
+    try std.testing.expectEqual(@as(u16, 0), ports.rank(0));
+    try std.testing.expect(ports.lookup(65534) == null);
+    try std.testing.expectEqual(@as(u16, 0), ports.rank(65534));
+}

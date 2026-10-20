@@ -22,7 +22,7 @@ pub const Service = struct {
     category: ?[]const u8,
 };
 
-/// port u16, reserved u16, then label, iana, description and category as
+/// port u16, rank u16, then label, iana, description and category as
 /// u32 string-pool offsets.
 const RECORD_SIZE = 20;
 
@@ -33,6 +33,51 @@ pub const EMBEDDED_COUNT: usize = db.entry_count;
 /// Look up a TCP port by binary search. No allocations; the returned
 /// strings live in .rodata.
 pub fn lookup(port: u16) ?Service {
+    return decode(db.record(indexOf(port) orelse return null));
+}
+
+/// The port of entry `index` (index < EMBEDDED_COUNT). Entries are sorted
+/// by port, so this also lets tests walk the whole table.
+pub fn portAt(index: usize) u16 {
+    return std.mem.readInt(u16, db.record(index)[0..2], .little);
+}
+
+/// How often entry `index`'s port is found open, as a rank: 1 for the
+/// port most often open, 0 when scripts/port_counts.json has no count
+/// for it.
+pub fn rankAt(index: usize) u16 {
+    return std.mem.readInt(u16, db.record(index)[2..4], .little);
+}
+
+/// `port`'s rank (see rankAt); 0 for a port the table does not know.
+pub fn rank(port: u16) u16 {
+    return rankAt(indexOf(port) orelse return 0);
+}
+
+/// The ranked ports, most often open first: the order port scans try
+/// them in. The generator ranks only ports with a name (IANA's or the
+/// overlay's), since a count alone does not say what runs there, so a
+/// common port nobody could name stays unranked and is tried in port
+/// order. Built at compile time, so a scan walks it without sorting or
+/// allocating.
+pub const by_rank: []const u16 = blk: {
+    @setEvalBranchQuota(100 * db.entry_count + 1000);
+    var count: usize = 0;
+    for (0..db.entry_count) |i| {
+        if (rankAt(i) != 0) count += 1;
+    }
+    var order: [count]u16 = @splat(0);
+    for (0..db.entry_count) |i| {
+        const r = rankAt(i);
+        if (r == 0) continue;
+        if (r > count or order[r - 1] != 0) @compileError("ports.bin ranks must run 1..N without gaps or repeats");
+        order[r - 1] = portAt(i);
+    }
+    const final = order;
+    break :blk &final;
+};
+
+fn indexOf(port: u16) ?usize {
     var low: usize = 0;
     var high: usize = db.entry_count;
     while (low < high) {
@@ -43,16 +88,10 @@ pub fn lookup(port: u16) ?Service {
         } else if (port > key) {
             low = mid + 1;
         } else {
-            return decode(db.record(mid));
+            return mid;
         }
     }
     return null;
-}
-
-/// The port of entry `index` (index < EMBEDDED_COUNT). Entries are sorted
-/// by port, so this also lets tests walk the whole table.
-pub fn portAt(index: usize) u16 {
-    return std.mem.readInt(u16, db.record(index)[0..2], .little);
 }
 
 fn decode(record: []const u8) ?Service {

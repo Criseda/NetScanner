@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+- `ns -p` tries the ports most often found open first, most likely
+  first, then the rest of the range in port order. Some hosts
+  rate-limit SYNs and answer only the first dozen or so of a burst; a
+  home router's open DNS port 53 was lost in every scan when probed
+  53rd, as port order had it, while nmap, which also tries the ports
+  most often open first, found it. The ranking comes from how many
+  Internet hosts Censys finds with each TCP port open
+  (`scripts/port_counts.json`, the 2000 most common), not from any one
+  network; only ports with a name are ranked, and common ones that
+  had none get one in the overlay. Same probes, same pace. `port`
+  events now come in that order; the closing table and the JSON
+  summary's `open_ports` stay sorted.
+  Windows 11, wired, ReleaseFast, old (`main`) and new interleaved in
+  one random order, 5 s of quiet before each run, medians (p90):
+  - router 1-1024 (12 runs each): 0.894s (1.064s) -> 0.897s (0.999s);
+    port 53 found in 6 of 12 runs instead of 0; 80 and 443 in all.
+  - router 1-100 (10 each): 0.598s (0.652s) -> 0.551s (0.645s), both
+    bimodal at about 0.55 and 0.65s; 53 found in 3 of 10 instead of 0.
+  - router 1-65535 (10 each): 15.00s (15.38s) -> 14.89s (15.07s); 53
+    found in 9 of 10 instead of 0 (it goes out 18th).
+  - scanme.nmap.org 1-1024 (4 each): 0.753s -> 0.728s, 22 and 80 every
+    run. Home /24 discovery (`ns -s`, path unchanged): 1.259s -> 0.850s,
+    both bimodal; 11 hosts, except 10 in new's last two runs, after
+    old's last.
+  The router answers 53 less often for a while after a full-range
+  scan, which those runs mixed in. Without full-range runs, 20 s of
+  quiet before each, the ranked order against trying the curated
+  overlay ports first: 53 found on 1-100 in 8 of 10 runs against 7,
+  on 1-1024 in 5 of 10 against 3, at the same speed; and /24 found 9
+  hosts in every run of both old and new after the first.
+  Linux and macOS were not measured: the change only reorders the
+  ports a scan already tries, the same on every OS.
+- `ns -p` names 102 more ports that IANA leaves unnamed. The 88 open on
+  50,000+ Internet hosts are labelled from what Censys and Shodan see
+  on them (mostly `HTTP alt`; also Android TV Remote, Kubelet,
+  RustDesk, MikroTik API, Windows RPC dynamic ports, ...) or from
+  Wikipedia's port list (CC BY-SA 4.0) where scans could not tell.
+  14 less common ones are named from their documented default use
+  where that is plausibly what runs there: Minecraft, FiveM, Bitcoin,
+  Transmission, Deluge, TeamCity, ComfyUI, Vite, Envoy, NATS, ...
+
 ## v1.7.0
 
 MAC addresses, manufacturers and quiet hosts for apps that run `ns`

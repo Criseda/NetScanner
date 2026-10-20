@@ -214,12 +214,13 @@ pub const ScanOptions = struct {
 ///
 /// Many connects stay in flight at once (connects.run), as many as the
 /// host keeps answering promptly: no thread per port, no sleeps, no
-/// per-port stderr. A second pass then retries the ports a learned
-/// wait left unanswered, and a third the ones still silent when the
-/// second showed the host had been losing probes (see
-/// PortScan.needsThirdPass). Only open ports print, and
-/// only when options.stream_results is set; closed and filtered both
-/// mean "not open" and stay silent either way.
+/// per-port stderr. The ports most often found open go first (see
+/// PortScan.nextFirstPort). A second pass then retries the ports a
+/// learned wait left unanswered, and a third the ones still silent
+/// when the second showed the host had been losing probes (see
+/// PortScan.needsThirdPass). Only open ports print, and only when
+/// options.stream_results is set; closed and filtered both mean "not
+/// open" and stay silent either way.
 pub fn scanPorts(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -239,6 +240,7 @@ pub fn scanPorts(
         .run = run,
         .ip = ip_address,
         .next_port = start_port,
+        .start = start_port,
         .end = end_port,
         .fixed_ms = options.timeout_ms,
         .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_HEADROOM_MS, PORT_TIMEOUT_MS),
@@ -295,8 +297,13 @@ const PortScan = struct {
     run: Run,
     ip: [4]u8,
     pass: enum { first, retry, third } = .first,
-    /// The next port the first pass tries; past `end` once it is done.
+    /// The first pass tries the range's ranked ports first (see
+    /// nextFirstPort): this is the next ports.by_rank entry it looks at.
+    next_ranked: usize = 0,
+    /// Then every other port: the next one it tries; past `end` once
+    /// the first pass is done.
     next_port: u32,
+    start: u32,
     end: u32,
     /// `--timeout`: the same wait for every probe, and no retry pass.
     fixed_ms: ?u16,
@@ -331,12 +338,7 @@ const PortScan = struct {
     pub fn next(self: *PortScan) ?PortProbe {
         if (self.run.stopRequested()) return null;
         switch (self.pass) {
-            .first => {
-                if (self.next_port > self.end) return null;
-                const port: u16 = @intCast(self.next_port);
-                self.next_port += 1;
-                return self.firstTry(port);
-            },
+            .first => return self.firstTry(self.nextFirstPort() orelse return null),
             .retry => {
                 if (self.next_retry >= self.retries.items.len) return null;
                 const deferred = self.retries.items[self.next_retry];
@@ -357,6 +359,42 @@ const PortScan = struct {
                 return self.probe(deferred.port, self.estimator.timeoutMs(), false);
             },
         }
+    }
+
+    /// The first pass's next port: the range's ranked ports, most often
+    /// open first (ports.by_rank), then all the rest in ascending order.
+    /// Null once the range is done.
+    ///
+    /// A scan opens with a burst of a few hundred SYNs, and some hosts
+    /// rate-limit SYNs: they answer the first few of a burst and drop
+    /// the rest. A home router answered its open DNS port 53 after up
+    /// to 15 SYNs to closed ports, but not after 20 or more, nor to its
+    /// own retransmits, until it had been left alone for a while: 100
+    /// ms after 52 SYNs, 0.5 s after a 1-1024 scan. Its web ports
+    /// answered regardless, and its closed ports were silent either
+    /// way, so nothing a scan sees tells the lost open port from them;
+    /// staying under that limit would take some 10 probes a second,
+    /// against the 2000 a second ns makes. So the first probes, the
+    /// ones such a host still answers, go to the ports most likely to
+    /// be open, as nmap's do. Likely means how many Internet hosts
+    /// Censys finds with the port open (scripts/port_counts.json), not
+    /// a hand-picked list: picking the ports that mattered on one
+    /// router would only fit that router. In port order the router's 53
+    /// went out 53rd and no run found it; ranked, it goes out 5th to
+    /// 18th, depending on the range, and is found. The order costs
+    /// nothing: the same ports are tried, as fast.
+    fn nextFirstPort(self: *PortScan) ?u16 {
+        while (self.next_ranked < ports.by_rank.len) {
+            const port = ports.by_rank[self.next_ranked];
+            self.next_ranked += 1;
+            if (port >= self.start and port <= self.end) return port;
+        }
+        while (self.next_port <= self.end) {
+            const port: u16 = @intCast(self.next_port);
+            self.next_port += 1;
+            if (ports.rank(port) == 0) return port;
+        }
+        return null;
     }
 
     /// Least second tries answered before a scan counts its first pass
