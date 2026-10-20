@@ -25,6 +25,8 @@ scan.
   <img alt="Median wall time, ns vs nmap: host discovery 1.18 s vs 22.5 s, router ports 1-1024 0.88 s vs 46.6 s, router ports 1-65535 14.9 s vs 48.4 min, scanme.nmap.org ports 1-1024 0.75 s vs 85.6 s" src="docs/assets/ns-vs-nmap-light.svg">
 </picture>
 
+<sub>Source: [docs/benchmarks.md](docs/benchmarks.md)</sub>
+
 Measured against nmap 7.92 on the same targets, with no admin rights
 for either tool, so nmap scans with TCP `connect()` just as `ns` does.
 Windows 11, wired to a home router that drops probes to closed ports.
