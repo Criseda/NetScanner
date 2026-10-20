@@ -7,10 +7,20 @@
 # (see docker/README.md).
 name: CI
 
+# Docs-only changes skip CI: nothing they touch is built or tested.
+# A change that mixes docs and code still runs, since paths-ignore
+# only skips when every changed file matches. Safe while main has no
+# required status checks; if it gets some, a skipped run would leave
+# docs PRs waiting on checks that never report.
 on:
   push:
     branches: [main]
+    paths-ignore: &docs-only
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
   pull_request:
+    paths-ignore: *docs-only
 
 # No GitHub API access needed: checkout and build only.
 permissions: {}
