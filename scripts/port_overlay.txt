@@ -256,3 +256,23 @@
 61234 | HTTP alt             | web       |             | Common alternate HTTP port
 62345 | HTTP alt             | web       |             | Common alternate HTTP port
 63345 | HTTP alt             | web       |             | Common alternate HTTP port
+
+# Below 50,000 hosts, ports are named only from their documented default
+# use (Wikipedia's list, checked against the vendor's own docs), and only
+# when that software is plausibly what most such hosts run: not dead
+# software, not a client-side or localhost-only port, not one port of a
+# hosting provider's run of ports.
+5173  | Vite dev server      | web       |             | Vite development server
+5667  | Nagios NSCA          | network   |             | Nagios Service Check Acceptor
+5701  | Hazelcast            | database  |             | Hazelcast cluster member
+8111  | TeamCity             | web       |             | JetBrains TeamCity server
+8112  | Deluge web UI        | file      |             | Deluge BitTorrent client web UI
+8188  | ComfyUI              | web       |             | ComfyUI image generation web UI
+8222  | NATS monitoring      | messaging |             | NATS server HTTP monitoring
+8333  | Bitcoin              | network   |             | Bitcoin peer-to-peer network
+9030  | Tor directory        | proxy     |             | Tor relay directory port (DirPort)
+9901  | Envoy admin          | proxy     |             | Envoy proxy admin interface
+25565 | Minecraft            | media     |             | Minecraft (Java Edition) server
+30120 | FiveM                | media     |             | FiveM (GTA V multiplayer) server
+49160 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+51413 | Transmission         | file      |             | Transmission BitTorrent client peer port

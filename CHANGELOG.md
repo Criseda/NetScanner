@@ -34,11 +34,14 @@
   hosts in every run of both old and new after the first.
   Linux and macOS were not measured: the change only reorders the
   ports a scan already tries, the same on every OS.
-- `ns -p` names 88 more ports: the ones open on 50,000+ Internet hosts
-  that IANA leaves unnamed, labelled from what Censys and Shodan see on
-  them (mostly `HTTP alt`; also Android TV Remote, Kubelet, RustDesk,
-  MikroTik API, Windows RPC dynamic ports, ...) or from Wikipedia's
-  port list (CC BY-SA 4.0) where scans could not tell.
+- `ns -p` names 102 more ports that IANA leaves unnamed. The 88 open on
+  50,000+ Internet hosts are labelled from what Censys and Shodan see
+  on them (mostly `HTTP alt`; also Android TV Remote, Kubelet,
+  RustDesk, MikroTik API, Windows RPC dynamic ports, ...) or from
+  Wikipedia's port list (CC BY-SA 4.0) where scans could not tell.
+  14 less common ones are named from their documented default use
+  where that is plausibly what runs there: Minecraft, FiveM, Bitcoin,
+  Transmission, Deluge, TeamCity, ComfyUI, Vite, Envoy, NATS, ...
 
 ## v1.7.0
 
