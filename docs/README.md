@@ -93,7 +93,16 @@ lookups. It has two sources, kept apart:
 - **Curated overlay** (`scripts/port_overlay.txt`): friendly labels
   ("RDP" rather than `ms-wbt-server`), categories, and common uses of
   ports IANA leaves unassigned or assigns to something else. Without an
-  overlay entry, `SERVICE` is the IANA name.
+  overlay entry, `SERVICE` is the IANA name. Ports common on the
+  Internet that IANA leaves unnamed are labelled from what
+  [Censys](https://censys.com) and [Shodan](https://www.shodan.io) see
+  on them, or from their documented use in Wikipedia's
+  [List of TCP and UDP port numbers](https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers)
+  (CC BY-SA 4.0).
+
+The same table also sets the order ports are tried in: the ones most
+often found open come first, ranked by how many Internet hosts Censys
+finds with each TCP port open (`scripts/port_counts.json`).
 
 Each connect attempt waits as long as the host's own answers suggest:
 `ns` times the ports that answer and waits a little longer than that
@@ -170,7 +179,7 @@ always last:
   `--vendor`, one per host, after the sweep. Only requested fields are
   present; unresolved ones are `null`.
 - Port scans stream one `port` event per open port, in the order they
-  are found (common services are tried first), and end with
+  are found (the ports most often open are tried first), and end with
   `{"type":"summary","open_ports":[22,3389],"elapsed_ms":512}`, sorted:
 
   ```text
@@ -309,13 +318,16 @@ first argument to run offline:
 
 ```sh
 python scripts/generate_oui.py     # Wireshark manuf -> oui.bin
-python scripts/generate_ports.py   # IANA registry + port_overlay.txt -> ports.bin
+python scripts/generate_ports.py   # IANA registry + port_overlay.txt + port_counts.json -> ports.bin
 ```
 
-`generate_ports.py` prints which ports were added, removed or renamed;
-paste that into the PR. Curated port names live in
-`scripts/port_overlay.txt`, which documents its own format. Commit the
-regenerated `.bin` together with any overlay change.
+`generate_ports.py` prints which ports were added, removed or renamed,
+and how the scan order changed; paste that into the PR. Curated port
+names live in `scripts/port_overlay.txt`, which documents its own
+format. Open-port counts live in `scripts/port_counts.json`, a Censys
+report saved as-is (the generator's docstring says how to rerun it);
+the run lists the most common ports still without a name. Commit the
+regenerated `.bin` together with any overlay or count change.
 
 ## Linux test lab
 

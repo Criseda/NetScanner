@@ -10,11 +10,11 @@
 #              port and the first is not the one in use. Usually blank.
 # description  Replaces the IANA description. Blank keeps IANA's.
 #
-# Only add ports people actually meet on a LAN. When a port is commonly
-# used for something other than its IANA assignment, say so in the
-# description; the IANA name is still reported next to it. Port scans
-# also try the ports listed here first, while a host that rate-limits
-# SYNs still answers. After editing, run `python scripts/generate_ports.py`
+# Only add ports people actually meet on a LAN, or (in the last section)
+# ports port_counts.json finds open often enough to rank but that have no
+# name yet. When a port is commonly used for something other than its
+# IANA assignment, say so in the description; the IANA name is still
+# reported next to it. After editing, run `python scripts/generate_ports.py`
 # and commit both files.
 
 # Web
@@ -156,3 +156,103 @@
 6053  | ESPHome              | home      |             | ESPHome native API
 8123  | Home Assistant       | home      |             | Home Assistant web UI
 62078 | Apple device sync    |           |             | iPhone and iPad Wi-Fi sync (lockdownd)
+
+# Common on the Internet
+#
+# Ports scripts/port_counts.json finds open on 50,000+ hosts that IANA
+# does not name. Each label comes from what scanners see on the port
+# (2026-10-20): a product on most hosts names it (Censys, else Shodan
+# when it sees 5,000+ hosts), else the protocol most hosts speak (HTTP
+# alt, SSH alt). Where neither names it, the name is the port's
+# documented default use, from its vendor's docs or Wikipedia's "List
+# of TCP and UDP port numbers" (CC BY-SA 4.0), and only when the scans
+# don't contradict it. Ports none of these could name are left out and
+# stay unranked.
+26    | SMTP alt             | mail      |             | Alternate SMTP port (Exim and Postfix on most identified hosts)
+808   | Net.TCP              | network   |             | Microsoft Net.TCP Port Sharing Service (WCF)
+1024  | HTTP alt             | web       |             | Common alternate HTTP port (router web interfaces)
+5800  | VNC over HTTP        | remote    |             | VNC Java viewer served over HTTP (display :0)
+6264  | HTTP alt             | web       |             | Common alternate HTTP port
+6466  | Android TV Remote    | home      |             | Android TV Remote Service (remote control)
+6467  | Android TV pairing   | home      |             | Android TV Remote Service (pairing)
+6599  | HTTP alt             | web       |             | Common alternate HTTP port
+6881  | BitTorrent           | file      |             | BitTorrent peer port (start of the default range)
+7050  | HTTP alt             | web       |             | Common alternate HTTP port
+8010  | HTTP alt             | web       |             | Common alternate HTTP port
+8011  | HTTP alt             | web       |             | Common alternate HTTP port
+8060  | HTTP alt             | web       |             | Common alternate HTTP port
+8069  | HTTP alt             | web       |             | Common alternate HTTP port (Odoo)
+8085  | HTTP alt             | web       |             | Common alternate HTTP port
+8089  | HTTP alt             | web       |             | Common alternate HTTP port (Splunk management, Fritz!Box TR-069)
+8092  | HTTP alt             | web       |             | Common alternate HTTP port
+8093  | HTTP alt             | web       |             | Common alternate HTTP port
+8095  | HTTP alt             | web       |             | Common alternate HTTP port
+8159  | HTTP alt             | web       |             | Common alternate HTTP port
+8172  | IIS remote admin     | web       |             | IIS Web Management Service (remote IIS Manager)
+8180  | HTTP alt             | web       |             | Common alternate HTTP port
+8602  | HTTP alt             | web       |             | Common alternate HTTP port
+8728  | MikroTik API         | network   |             | MikroTik RouterOS API
+8729  | MikroTik API (TLS)   | network   |             | MikroTik RouterOS API over TLS
+8885  | HTTP alt             | web       |             | Common alternate HTTP port
+8886  | HTTP alt             | web       |             | Common alternate HTTP port
+9003  | HTTP alt             | web       |             | Common alternate HTTP port
+9527  | HTTP alt             | web       |             | Common alternate HTTP port
+10011 | TeamSpeak query      | voip      |             | TeamSpeak 3 ServerQuery
+10030 | HTTP alt             | web       |             | Common alternate HTTP port
+10249 | kube-proxy metrics   | network   |             | Kubernetes kube-proxy metrics
+10250 | Kubelet              | network   |             | Kubernetes kubelet API
+10256 | kube-proxy health    | network   |             | Kubernetes kube-proxy health check
+10257 | kube-controller      | network   |             | Kubernetes controller manager (HTTPS)
+12323 | HTTP proxy           | proxy     |             | Open HTTP proxies on most hosts seen
+12325 | HTTP alt             | web       |             | Common alternate HTTP port
+12326 | HTTP alt             | web       |             | Common alternate HTTP port
+13133 | OTel health check    | network   |             | OpenTelemetry Collector health check
+15323 | HTTP alt             | web       |             | Common alternate HTTP port
+15672 | RabbitMQ admin       | messaging |             | RabbitMQ management web UI
+17000 | HTTP alt             | web       |             | Common alternate HTTP port
+18080 | HTTP alt             | web       |             | Common alternate HTTP port (also Monero P2P)
+18081 | HTTP alt             | web       |             | Common alternate HTTP port (also Monero RPC)
+18789 | OpenClaw             | web       |             | OpenClaw AI agent gateway
+21115 | RustDesk             | remote    |             | RustDesk server (NAT type test)
+21116 | RustDesk             | remote    |             | RustDesk ID / rendezvous server
+21118 | RustDesk web         | remote    |             | RustDesk ID server for web clients
+21119 | RustDesk web relay   | remote    |             | RustDesk relay for web clients
+22323 | HTTP alt             | web       |             | Common alternate HTTP port
+24442 | SSH alt              | remote    |             | Alternate SSH port
+27000 | FlexNet license      | network   |             | FlexNet Publisher (FlexLM) license server
+27036 | Steam streaming      | media     |             | Steam In-Home Streaming
+30005 | HTTP alt             | web       |             | Common alternate HTTP port
+40003 | HTTP alt             | web       |             | Common alternate HTTP port
+40801 | HTTP alt             | web       |             | Common alternate HTTP port
+40803 | HTTP alt             | web       |             | Common alternate HTTP port (Tengine)
+40804 | HTTP alt             | web       |             | Common alternate HTTP port
+42069 | HTTP alt             | web       |             | Common alternate HTTP port
+49152 | MS RPC / UPnP        | network   |             | First Windows RPC dynamic port; also the libupnp default
+49153 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49154 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49155 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49156 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49157 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49158 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49159 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49501 | HTTP alt             | web       |             | Common alternate HTTP port
+49664 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49665 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49666 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49667 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49668 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49669 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49670 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49671 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+49675 | MS RPC dynamic       | network   |             | Windows RPC dynamic port
+50001 | HTTP alt             | web       |             | Common alternate HTTP port
+50805 | HTTP alt             | web       |             | Common alternate HTTP port
+50995 | HTTP alt             | web       |             | Common alternate HTTP port
+51005 | HTTP alt             | web       |             | Common alternate HTTP port
+51007 | HTTP alt             | web       |             | Common alternate HTTP port
+58000 | HTTP alt             | web       |             | Common alternate HTTP port
+58603 | HTTP alt             | web       |             | Common alternate HTTP port
+60000 | HTTP proxy           | proxy     |             | Squid HTTP proxy on most hosts seen
+61234 | HTTP alt             | web       |             | Common alternate HTTP port
+62345 | HTTP alt             | web       |             | Common alternate HTTP port
+63345 | HTTP alt             | web       |             | Common alternate HTTP port

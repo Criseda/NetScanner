@@ -214,7 +214,7 @@ pub const ScanOptions = struct {
 ///
 /// Many connects stay in flight at once (connects.run), as many as the
 /// host keeps answering promptly: no thread per port, no sleeps, no
-/// per-port stderr. Common services go first (see
+/// per-port stderr. The ports most often found open go first (see
 /// PortScan.nextFirstPort). A second pass then retries the ports a
 /// learned wait left unanswered, and a third the ones still silent
 /// when the second showed the host had been losing probes (see
@@ -239,8 +239,8 @@ pub fn scanPorts(
     var scan: PortScan = .{
         .run = run,
         .ip = ip_address,
-        .next_common = ports.firstIndexFrom(start_port),
         .next_port = start_port,
+        .start = start_port,
         .end = end_port,
         .fixed_ms = options.timeout_ms,
         .estimator = .init(PORT_TIMEOUT_FLOOR_MS, PORT_TIMEOUT_HEADROOM_MS, PORT_TIMEOUT_MS),
@@ -297,12 +297,13 @@ const PortScan = struct {
     run: Run,
     ip: [4]u8,
     pass: enum { first, retry, third } = .first,
-    /// The first pass tries the range's common ports first (see
-    /// nextFirstPort): this is the next port table entry it looks at.
-    next_common: usize,
+    /// The first pass tries the range's ranked ports first (see
+    /// nextFirstPort): this is the next ports.by_rank entry it looks at.
+    next_ranked: usize = 0,
     /// Then every other port: the next one it tries; past `end` once
     /// the first pass is done.
     next_port: u32,
+    start: u32,
     end: u32,
     /// `--timeout`: the same wait for every probe, and no retry pass.
     fixed_ms: ?u16,
@@ -360,8 +361,8 @@ const PortScan = struct {
         }
     }
 
-    /// The first pass's next port: the range's common services (see
-    /// ports.isCommonAt), then all the rest, each in ascending order.
+    /// The first pass's next port: the range's ranked ports, most often
+    /// open first (ports.by_rank), then all the rest in ascending order.
     /// Null once the range is done.
     ///
     /// A scan opens with a burst of a few hundred SYNs, and some hosts
@@ -373,27 +374,21 @@ const PortScan = struct {
     /// answered regardless, and its closed ports were silent either
     /// way, so nothing a scan sees tells the lost open port from them;
     /// staying under that limit would take some 10 probes a second,
-    /// against the 2000 a second ns makes. In port order 53 went out
-    /// 53rd, and no run found it, while nmap, which also tries common
-    /// ports first, found it in 17 of 20; 6th, it was found every
-    /// time. So the first probes, the ones a host is surest to answer,
-    /// go to the ports most likely to be open. The order costs
-    /// nothing: the same ports are tried, as fast.
+    /// against the 2000 a second ns makes. So the first probes, the
+    /// ones such a host still answers, go to the ports most likely to
+    /// be open, as nmap's do. Likely by published counts of open ports
+    /// (scripts/port_counts.json), not by what any one network runs. The
+    /// order costs nothing: the same ports are tried, as fast.
     fn nextFirstPort(self: *PortScan) ?u16 {
-        while (self.next_common < ports.EMBEDDED_COUNT) {
-            const index = self.next_common;
-            self.next_common += 1;
-            const port = ports.portAt(index);
-            if (port > self.end) {
-                self.next_common = ports.EMBEDDED_COUNT;
-                break;
-            }
-            if (ports.isCommonAt(index)) return port;
+        while (self.next_ranked < ports.by_rank.len) {
+            const port = ports.by_rank[self.next_ranked];
+            self.next_ranked += 1;
+            if (port >= self.start and port <= self.end) return port;
         }
         while (self.next_port <= self.end) {
             const port: u16 = @intCast(self.next_port);
             self.next_port += 1;
-            if (!ports.isCommon(port)) return port;
+            if (ports.rank(port) == 0) return port;
         }
         return null;
     }

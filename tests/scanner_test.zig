@@ -156,13 +156,13 @@ test "scanPorts stays sorted over many connects in flight" {
     try assertSorted(u16, open.items);
 }
 
-test "scanPorts tries every port once, common services first or not" {
+test "scanPorts tries every port once, ranked or not" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const io = std.testing.io;
 
-    // 1-300 holds common services (22, 53, 80, ...), tried before the
-    // rest: each port must still be tried exactly once, so progress
-    // ends at the range's size and no open port comes back twice.
+    // Ranked ports in 1-300 are tried before the rest: each port must
+    // still be tried exactly once, so progress ends at the range's
+    // size and no open port comes back twice.
     var tracker: progress.Tracker = .{};
     var open = try scanner.scanPorts(
         std.testing.allocator,

@@ -4,13 +4,30 @@ generate_ports.py - Packs the IANA TCP port registry, merged with the
 curated overlay in port_overlay.txt, into a compact binary lookup table
 (ports.bin) for NetScanner.
 
-Two sources, kept apart on purpose:
+Three sources, kept apart on purpose:
 - IANA (official): the service name and description registered for each
   TCP port. Public domain (CC0), updated as ports are assigned.
 - port_overlay.txt (curated): friendly labels ("RDP" for ms-wbt-server),
   categories, and common de-facto uses of ports IANA leaves unassigned or
   assigns to something else. The overlay never invents an IANA name; the
   `iana` field of a port is always the registry's own.
+- port_counts.json (measured): how many Internet hosts have each TCP
+  port open, the 2000 most common, as Censys counts them. It ranks the
+  ports a scan tries first, so the order comes from observed counts,
+  not from our judgment or any one network. (nmap's frequency data
+  would do too, but its license covers any software that includes it,
+  which a GPL program cannot meet.)
+
+  The file is a Censys Platform aggregation report saved unedited with
+  its "Copy JSON" button, taken 2026-10-20: query
+  `host.services.transport_protocol="TCP"`, breakdown
+  `host.services.port`, count by host, 2000 results, with "only display
+  nested records that match my query" ticked so UDP services on the
+  same hosts don't count. To refresh, run the same report and replace
+  the file. Only ports with a name (IANA's or the overlay's) are
+  ranked: a count alone does not say what a port is. When a common
+  port has no name, find out what Censys sees on it and add it to the
+  overlay, or leave it unranked.
 
 Format layout (little-endian):
 - Header (24 bytes, same layout as oui.bin):
@@ -22,7 +39,9 @@ Format layout (little-endian):
     strings_len: u32
 - Table: entry_count * 20 bytes, sorted by port, one record per port
     port: u16
-    reserved: u16 (0)
+    rank: u16         1 for the port most often open, 2 for the next,
+                      ...; 0 when port_counts.json has no count for it.
+                      Ranked ports' ranks run 1..N with no gaps.
     label: u32        curated display name
     iana: u32         IANA service name
     description: u32  curated description, else IANA's
@@ -37,6 +56,7 @@ ports.bin exists, the script prints what changed, for the PR description.
 
 import csv
 import io
+import json
 import os
 import re
 import struct
@@ -148,6 +168,47 @@ def merge(iana, overlay):
     return merged
 
 
+def parse_counts(path: str, merged):
+    """Return ({port: rank}, [unnamed ports], {port: count}), rank 1
+    being the port most often found open.
+
+    Reads a Censys aggregation report (see the module docstring). The
+    ranks come from the counts alone: higher count first, ties in port
+    order. Ports the table has no name for are left unranked and
+    returned, most common first, so the run can list them. Aborts on a
+    report that is not the expected one, so a wrong export fails here
+    instead of shipping.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        report = json.load(f)
+
+    def fail(msg: str):
+        sys.exit(f"{path}: {msg}")
+
+    if report.get("field") != "host.services.port":
+        fail(f"expected a breakdown by host.services.port, got {report.get('field')!r}")
+    if "TCP" not in report.get("query", ""):
+        fail(f"expected a TCP-only query, got {report.get('query')!r}")
+    counts = {}
+    for bucket in report.get("buckets", []):
+        if bucket.get("isLocked"):
+            fail(f"port {bucket.get('key')} is locked in this export; its count is missing")
+        key, count = bucket.get("key", ""), bucket.get("count")
+        if not key.isdigit() or not 0 <= int(key) <= 65535 or not isinstance(count, int) or count <= 0:
+            fail(f"invalid bucket {bucket!r}")
+        port = int(key)
+        if port in counts:
+            fail(f"duplicate port {port}")
+        # Port 0 cannot be connected to; Censys lists it for services
+        # it could not place on a port.
+        if port != 0:
+            counts[port] = count
+    order = sorted(counts, key=lambda port: (-counts[port], port))
+    named = [port for port in order if port in merged]
+    unnamed = [port for port in order if port not in merged]
+    return {port: rank for rank, port in enumerate(named, 1)}, unnamed, counts
+
+
 def encode(text: str) -> bytes:
     """UTF-8, cut to the 255-byte limit of a length prefix without splitting a character."""
     data = text.encode("utf-8")
@@ -156,7 +217,7 @@ def encode(text: str) -> bytes:
     return data
 
 
-def pack(merged) -> bytes:
+def pack(merged, ranks) -> bytes:
     pool = bytearray(b"\x00")  # offset 0: the empty string
     offsets = {b"": 0}
 
@@ -170,7 +231,7 @@ def pack(merged) -> bytes:
 
     table = bytearray()
     for port, fields in merged.items():
-        table.extend(struct.pack(RECORD_FORMAT, port, 0, *(intern(f) for f in fields)))
+        table.extend(struct.pack(RECORD_FORMAT, port, ranks.get(port, 0), *(intern(f) for f in fields)))
 
     header_size = struct.calcsize(HEADER_FORMAT)
     header = struct.pack(
@@ -186,7 +247,7 @@ def pack(merged) -> bytes:
 
 
 def unpack(data: bytes):
-    """Decode a ports.bin back into {port: fields}, or None if it is not one."""
+    """Decode a ports.bin back into ({port: fields}, {port: rank}), or None if it is not one."""
     header_size = struct.calcsize(HEADER_FORMAT)
     if len(data) < header_size:
         return None
@@ -200,10 +261,13 @@ def unpack(data: bytes):
 
     record_size = struct.calcsize(RECORD_FORMAT)
     result = {}
+    ranks = {}
     for i in range(count):
-        port, _, *offsets = struct.unpack_from(RECORD_FORMAT, data, table_offset + i * record_size)
+        port, rank, *offsets = struct.unpack_from(RECORD_FORMAT, data, table_offset + i * record_size)
         result[port] = tuple(string(o) for o in offsets)
-    return result
+        if rank:
+            ranks[port] = rank
+    return result, ranks
 
 
 def describe(port, fields) -> str:
@@ -229,11 +293,21 @@ def report_changes(old, new):
         print(f"  ... and {len(changed) - limit} more changed")
 
 
+def report_rank_changes(old, new):
+    """Print the scan order's head when the ranks changed."""
+    if old == new:
+        return
+    head = sorted(new, key=new.get)[:25]
+    print(f"Ranks changed: {len(old)} -> {len(new)} ranked ports; scans now try first:")
+    print("  " + " ".join(str(port) for port in head) + (" ..." if len(new) > len(head) else ""))
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(script_dir)
     default_out = os.path.join(repo_root, "src", "core", "data", "ports.bin")
     overlay_path = os.path.join(script_dir, "port_overlay.txt")
+    counts_path = os.path.join(script_dir, "port_counts.json")
 
     in_path = sys.argv[1] if len(sys.argv) > 1 else None
     out_path = sys.argv[2] if len(sys.argv) > 2 else default_out
@@ -257,7 +331,8 @@ def main():
     iana, newest = parse_iana(content)
     overlay = parse_overlay(overlay_path, iana)
     merged = merge(iana, overlay)
-    data = pack(merged)
+    ranks, unnamed, counts = parse_counts(counts_path, merged)
+    data = pack(merged, ranks)
 
     old = None
     if os.path.exists(out_path):
@@ -272,8 +347,13 @@ def main():
     print(f"Packed {len(merged)} TCP ports into {out_path} ({len(data) / 1024:.1f} KB)")
     print(f"IANA: {len(iana)} ports, newest entry {newest or 'unknown'}")
     print(f"Overlay: {len(overlay)} ports ({curated_only} not assigned by IANA)")
+    print(f"Ranks: {len(ranks)} named ports with an open count; {len(unnamed)} unnamed left unranked")
+    if unnamed:
+        head = ", ".join(f"{port} ({counts[port]:,})" for port in unnamed[:10])
+        print(f"  most common unnamed: {head}" + (" ..." if len(unnamed) > 10 else ""))
     if old is not None:
-        report_changes(old, merged)
+        report_changes(old[0], merged)
+        report_rank_changes(old[1], ranks)
 
 
 if __name__ == "__main__":
