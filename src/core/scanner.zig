@@ -376,9 +376,13 @@ const PortScan = struct {
     /// staying under that limit would take some 10 probes a second,
     /// against the 2000 a second ns makes. So the first probes, the
     /// ones such a host still answers, go to the ports most likely to
-    /// be open, as nmap's do. Likely by published counts of open ports
-    /// (scripts/port_counts.json), not by what any one network runs. The
-    /// order costs nothing: the same ports are tried, as fast.
+    /// be open, as nmap's do. Likely means how many Internet hosts
+    /// Censys finds with the port open (scripts/port_counts.json), not
+    /// a hand-picked list: picking the ports that mattered on one
+    /// router would only fit that router. In port order the router's 53
+    /// went out 53rd and no run found it; ranked, it goes out 5th to
+    /// 18th, depending on the range, and is found. The order costs
+    /// nothing: the same ports are tried, as fast.
     fn nextFirstPort(self: *PortScan) ?u16 {
         while (self.next_ranked < ports.by_rank.len) {
             const port = ports.by_rank[self.next_ranked];

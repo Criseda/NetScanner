@@ -55,8 +55,11 @@ pub fn rank(port: u16) u16 {
 }
 
 /// The ranked ports, most often open first: the order port scans try
-/// them in. Built at compile time, so a scan walks it without sorting
-/// or allocating.
+/// them in. The generator ranks only ports with a name (IANA's or the
+/// overlay's), since a count alone does not say what runs there, so a
+/// common port nobody could name stays unranked and is tried in port
+/// order. Built at compile time, so a scan walks it without sorting or
+/// allocating.
 pub const by_rank: []const u16 = blk: {
     @setEvalBranchQuota(100 * db.entry_count + 1000);
     var count: usize = 0;
