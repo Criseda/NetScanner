@@ -5,7 +5,7 @@ pub const c = struct {
     pub extern "c" fn tcp_probe_finish(sock: usize, settled: c_int) c_int;
     pub extern "c" fn resolve_ptr(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize) c_int;
     pub extern "c" fn query_netbios(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
-    pub extern "c" fn query_mdns(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
+    pub extern "c" fn udp_exchange(ip: *const [4]u8, port: c_ushort, req: [*]const u8, req_len: usize, resp: [*]u8, cap: usize, timeout_ms: c_int) c_int;
     pub extern "c" fn read_file_content(path: [*:0]const u8, out_len: *usize) ?[*]u8;
     pub extern "c" fn free_file_content(ptr: [*]u8) void;
     pub extern "c" fn get_mac_sendarp(ip_address: [*:0]const u8, out_mac: [*]u8) c_int;
@@ -99,11 +99,13 @@ pub fn queryNetbios(ip_null_terminated: [*:0]const u8, buf: []u8, timeout_ms: c_
     return null;
 }
 
-pub fn queryMdns(ip_null_terminated: [*:0]const u8, buf: []u8, timeout_ms: c_int) ?[]const u8 {
-    if (c.query_mdns(ip_null_terminated, buf.ptr, buf.len, timeout_ms) == 0) {
-        return std.mem.sliceTo(buf, 0);
-    }
-    return null;
+/// Send `request` to ip:port and wait up to timeout_ms for one reply
+/// from that address (see udp_exchange in resolver.h). The reply, in
+/// `buf`, or null on timeout or failure.
+pub fn udpExchange(ip: [4]u8, port: u16, request: []const u8, buf: []u8, timeout_ms: c_int) ?[]u8 {
+    const n = c.udp_exchange(&ip, port, request.ptr, request.len, buf.ptr, buf.len, timeout_ms);
+    if (n < 0) return null;
+    return buf[0..@intCast(n)];
 }
 
 /// Most sockets one tcpProbeWait call watches (TCP_PROBE_MAX_SOCKETS

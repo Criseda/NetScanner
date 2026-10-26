@@ -211,64 +211,10 @@ int query_netbios(const char *ip_address, char *out_buf, size_t out_len,
   return -1;
 }
 
-static int parse_dns_name(const unsigned char *pkt, size_t pkt_len, size_t pos,
-                          char *out, size_t out_len) {
-  size_t out_pos = 0;
-  int depth = 0;
-
-  while (pos < pkt_len && depth < 20) {
-    unsigned char len = pkt[pos];
-    if (len == 0) break;
-    if ((len & 0xC0) == 0xC0) {
-      if (pos + 1 >= pkt_len) return -1;
-      pos = ((size_t)(len & 0x3F) << 8) | (size_t)pkt[pos + 1];
-      depth++;
-      continue;
-    }
-    pos++;
-    if (pos + len > pkt_len) return -1;
-    if (out_pos > 0 && out_pos + 1 < out_len) {
-      out[out_pos++] = '.';
-    }
-    for (size_t i = 0; i < len && out_pos + 1 < out_len; i++) {
-      unsigned char c = pkt[pos + i];
-      if (c < 32 || c > 126) return -1; // Reject control characters and ANSI escape sequences
-      out[out_pos++] = (char)c;
-    }
-    pos += len;
-    depth++;
-  }
-  // Reject cyclic pointer loops and empty names
-  if (depth >= 20 || out_pos == 0) return -1;
-  if (out_pos < out_len) {
-    out[out_pos] = '\0';
-  } else {
-    out[out_len - 1] = '\0';
-  }
-  return 0;
-}
-
-static int skip_dns_name(const unsigned char *pkt, size_t pkt_len, size_t *pos) {
-  int depth = 0;
-  while (*pos < pkt_len && depth < 20) {
-    unsigned char len = pkt[*pos];
-    if (len == 0) {
-      (*pos)++;
-      return 0;
-    }
-    if ((len & 0xC0) == 0xC0) {
-      if (*pos + 1 >= pkt_len) return -1;
-      *pos += 2;
-      return 0;
-    }
-    *pos += 1 + len;
-    depth++;
-  }
-  return -1;
-}
-
-int query_mdns(const char *ip_address, char *out_buf, size_t out_len, int timeout_ms) {
-  if (!ip_address || !out_buf || out_len == 0 || timeout_ms <= 0) return -1;
+int udp_exchange(const unsigned char ip[4], unsigned short port,
+                 const unsigned char *req, size_t req_len, unsigned char *resp,
+                 size_t cap, int timeout_ms) {
+  if (!ip || !req || !resp || cap == 0 || timeout_ms <= 0) return -1;
 #ifdef _WIN32
   win_wsa_init_once();
   SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -287,59 +233,12 @@ int query_mdns(const char *ip_address, char *out_buf, size_t out_len, int timeou
   struct sockaddr_in dest;
   memset(&dest, 0, sizeof(dest));
   dest.sin_family = AF_INET;
-  dest.sin_port = htons(5353);
-#ifdef _WIN32
-  if (InetPtonA(AF_INET, ip_address, &dest.sin_addr) != 1) {
-    closesocket(sock);
-    return -1;
-  }
-#else
-  if (inet_pton(AF_INET, ip_address, &dest.sin_addr) != 1) {
-    close(sock);
-    return -1;
-  }
-#endif
+  dest.sin_port = htons(port);
+  memcpy(&dest.sin_addr.s_addr, ip, 4);
 
-  unsigned int o[4];
-  if (sscanf(ip_address, "%u.%u.%u.%u", &o[0], &o[1], &o[2], &o[3]) != 4) {
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
-    return -1;
-  }
-
-  unsigned char req[512];
-  req[0] = 0x00; req[1] = 0x01; // ID: 1
-  req[2] = 0x00; req[3] = 0x00; // Query
-  req[4] = 0x00; req[5] = 0x01; // QDCOUNT: 1
-  req[6] = 0x00; req[7] = 0x00; // ANCOUNT: 0
-  req[8] = 0x00; req[9] = 0x00; // NSCOUNT: 0
-  req[10] = 0x00; req[11] = 0x00; // ARCOUNT: 0
-
-  size_t idx = 12;
-  char num_buf[16];
-  for (int i = 3; i >= 0; i--) {
-    int nlen = snprintf(num_buf, sizeof(num_buf), "%u", o[i]);
-    req[idx++] = (unsigned char)nlen;
-    memcpy(&req[idx], num_buf, (size_t)nlen);
-    idx += (size_t)nlen;
-  }
-  req[idx++] = 7;
-  memcpy(&req[idx], "in-addr", 7);
-  idx += 7;
-  req[idx++] = 4;
-  memcpy(&req[idx], "arpa", 4);
-  idx += 4;
-  req[idx++] = 0x00; // end of name
-
-  req[idx++] = 0x00; req[idx++] = 0x0C; // QTYPE: PTR
-  req[idx++] = 0x00; req[idx++] = 0x01; // QCLASS: IN
-
-  int sent = sendto(sock, (const char *)req, (int)idx, 0,
+  int sent = sendto(sock, (const char *)req, (int)req_len, 0,
                     (struct sockaddr *)&dest, sizeof(dest));
-  if (sent != (int)idx) {
+  if (sent != (int)req_len) {
 #ifdef _WIN32
     closesocket(sock);
 #else
@@ -373,8 +272,7 @@ int query_mdns(const char *ip_address, char *out_buf, size_t out_len, int timeou
 #else
   socklen_t from_len = sizeof(from);
 #endif
-  unsigned char resp[1024];
-  int recv_len = recvfrom(sock, (char *)resp, sizeof(resp), 0,
+  int recv_len = recvfrom(sock, (char *)resp, (int)cap, 0,
                           (struct sockaddr *)&from, &from_len);
 #ifdef _WIN32
   closesocket(sock);
@@ -383,35 +281,11 @@ int query_mdns(const char *ip_address, char *out_buf, size_t out_len, int timeou
 #endif
 
   // A failed recvfrom (-1) leaves `from` unwritten, so the length comes
-  // first. Then verify the response originated from our target IP
-  // (discards rogue LAN multicast echoes).
-  if (recv_len < 12 || (size_t)from_len < sizeof(from)) return -1;
+  // first. Then verify the reply came from the host we asked (discards
+  // stray LAN multicast that happened to reach this port).
+  if (recv_len < 0 || (size_t)from_len < sizeof(from)) return -1;
   if (from.sin_addr.s_addr != dest.sin_addr.s_addr) return -1;
-  int qdcount = (resp[4] << 8) | resp[5];
-  int ancount = (resp[6] << 8) | resp[7];
-  if (ancount == 0) return -1;
-
-  size_t pos = 12;
-  for (int i = 0; i < qdcount; i++) {
-    if (skip_dns_name(resp, (size_t)recv_len, &pos) != 0) return -1;
-    if (pos + 4 > (size_t)recv_len) return -1;
-    pos += 4; // skip QTYPE + QCLASS
-  }
-
-  for (int i = 0; i < ancount; i++) {
-    if (skip_dns_name(resp, (size_t)recv_len, &pos) != 0) return -1;
-    if (pos + 10 > (size_t)recv_len) return -1;
-    unsigned short rtype = (unsigned short)((resp[pos] << 8) | resp[pos + 1]);
-    unsigned short rdlen = (unsigned short)((resp[pos + 8] << 8) | resp[pos + 9]);
-    pos += 10;
-    if (rtype == 0x000C) { // PTR
-      return parse_dns_name(resp, (size_t)recv_len, pos, out_buf, out_len);
-    }
-    if (pos + rdlen > (size_t)recv_len) return -1;
-    pos += rdlen;
-  }
-
-  return -1;
+  return recv_len;
 }
 
 char *read_file_content(const char *path, size_t *out_len) {

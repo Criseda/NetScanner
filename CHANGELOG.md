@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- The per-host mDNS name lookup (`--hostname`) reads the reply with the
+  same parser as the multicast listener, and the C one is gone (#91). A
+  PTR answer now counts only when it is about the address asked; one
+  naming another address used to be taken as the host's name. A reply
+  without a matching PTR can still name the host through an address
+  record pointing at it, as replies to the listener already could.
+
 - `ns -p` retries the ports it probed before the host's first answer.
   Those probes have no learned wait yet, so they waited the full 500 ms
   once and were never retried; with the most often open ports going

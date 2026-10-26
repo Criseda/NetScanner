@@ -3,6 +3,7 @@
 const std = @import("std");
 const c_bindings = @import("bindings");
 const utils = @import("utils.zig");
+const multicast = @import("multicast.zig");
 
 /// Resolve a single host's name using NetBIOS, mDNS, and Reverse DNS PTR.
 /// `mdns_name` is the host's mDNS name when a multicast reply already
@@ -24,7 +25,7 @@ pub fn resolveHostName(allocator: std.mem.Allocator, ip: [4]u8, mdns_name: ?[]co
     }
 
     // 2. Try mDNS (fast unicast UDP to port 5353 with 200ms timeout - PS5, Hue, Apple, Smart TVs)
-    if (mdns_name orelse c_bindings.queryMdns(ip_str.ptr, &name_buf, 200)) |name| {
+    if (mdns_name orelse queryMdns(ip, multicast.MDNS_PORT, 200, &name_buf)) |name| {
         const clean_name = cleanDomainName(name);
         if (clean_name.len > 0) {
             return allocator.dupe(u8, clean_name) catch null;
@@ -47,6 +48,17 @@ pub fn resolveHostName(allocator: std.mem.Allocator, ip: [4]u8, mdns_name: ?[]co
     }
 
     return null;
+}
+
+/// Ask `ip` for its own name by unicast mDNS ("d.c.b.a.in-addr.arpa
+/// PTR", RFC 6762 section 6.7) and read the reply with the same parser
+/// the multicast listener uses, so a PTR answer counts only when it is
+/// about `ip`. `port` is MDNS_PORT outside tests.
+pub fn queryMdns(ip: [4]u8, port: u16, timeout_ms: c_int, out: *[256]u8) ?[]const u8 {
+    var query_buf: [64]u8 = undefined;
+    var reply_buf: [1024]u8 = undefined;
+    const reply = c_bindings.udpExchange(ip, port, multicast.reverseQuery(&query_buf, ip), &reply_buf, timeout_ms) orelse return null;
+    return multicast.hostName(reply, ip, out);
 }
 
 /// Strip trailing domain components from reverse DNS results (e.g. "myhost.localdomain" -> "myhost").
