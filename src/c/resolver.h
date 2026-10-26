@@ -15,12 +15,15 @@ int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len);
 /// Returns 0 on success with a null-terminated name in out_buf, -1 on timeout/failure.
 int query_netbios(const char *ip_address, char *out_buf, size_t out_len, int timeout_ms);
 
-/// Query Multicast DNS reverse PTR (RFC 6762, UDP port 5353) with a bounded timeout.
-/// Sends a unicast DNS PTR request directly to the target host to discover gaming
-/// consoles (PlayStation, Nintendo), Apple devices, smart TVs, and IoT bridges
-/// without needing a local mDNS responder daemon.
-/// Returns 0 on success with a null-terminated name in out_buf, -1 on timeout/failure.
-int query_mdns(const char *ip_address, char *out_buf, size_t out_len, int timeout_ms);
+/// Send one UDP datagram to ip:port (4 bytes, network order) from an
+/// ephemeral port and wait up to timeout_ms for one reply from that same
+/// address. Used for the per-host unicast mDNS name query, whose packets
+/// src/core/multicast.zig builds and parses. Returns the reply's length
+/// in resp, or -1 on timeout or failure (on Windows, also at once when
+/// the host answers with an ICMP port unreachable).
+int udp_exchange(const unsigned char ip[4], unsigned short port,
+                 const unsigned char *req, size_t req_len, unsigned char *resp,
+                 size_t cap, int timeout_ms);
 
 /// Read an entire file into a newly allocated buffer using standard C stdio.
 /// Used for loading custom Wireshark or IEEE OUI databases cross-platform

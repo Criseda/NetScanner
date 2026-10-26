@@ -52,7 +52,7 @@ fn dnsQuery(comptime id: u16, comptime labels: []const []const u8, comptime qtyp
 }
 
 /// The unicast mDNS name query for `ip` ("d.c.b.a.in-addr.arpa PTR"),
-/// as src/c/resolver.c's query_mdns sends it, built in `buf`. Sent to a
+/// as resolver.queryMdns sends it, built in `buf`. Sent to a
 /// responder the moment it shows up, so its name is already known when
 /// `--hostname` asks for it.
 pub fn reverseQuery(buf: *[64]u8, ip: [4]u8) []const u8 {

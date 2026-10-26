@@ -2,29 +2,19 @@
 
 #include <string.h>
 
+#include "ns_socket.h"
+
 #ifdef _WIN32
-#include <WinSock2.h>
-#include <ws2tcpip.h>
 #include <mstcpip.h>
-#include <Windows.h>
 #include <iphlpapi.h>
 #include <stdlib.h>
-#include "win_wsa.h"
 // Winsock's own value (_WSAIOW(IOC_VENDOR, 12)); not every SDK names it.
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 #endif
 #else
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 #endif
 
 static uint32_t to_host_order(const unsigned char ip[4]) {
@@ -115,22 +105,11 @@ int mc_local_address(const unsigned char first[4], const unsigned char last[4],
 #endif
 }
 
-#ifdef _WIN32
-typedef SOCKET native_socket;
-#define CLOSE_SOCKET closesocket
-#else
-typedef int native_socket;
-#define CLOSE_SOCKET close
-#endif
-
 mc_socket mc_open(const unsigned char local[4]) {
   if (!local) return MC_NO_SOCKET;
+  ns_socket sock = ns_udp_socket();
+  if (sock == NS_NO_SOCKET) return MC_NO_SOCKET;
 #ifdef _WIN32
-  win_wsa_init_once();
-  SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (sock == INVALID_SOCKET) return MC_NO_SOCKET;
-  u_long nonblocking = 1;
-  ioctlsocket(sock, FIONBIO, &nonblocking);
   // Windows reports an ICMP port-unreachable for an earlier send as
   // WSAECONNRESET on the next recvfrom, which would end the listener
   // the first time a name query hits a host without mDNS. Turn that off.
@@ -138,11 +117,6 @@ mc_socket mc_open(const unsigned char local[4]) {
   DWORD returned = 0;
   WSAIoctl(sock, SIO_UDP_CONNRESET, &report_resets, sizeof(report_resets),
            NULL, 0, &returned, NULL, NULL);
-#else
-  int sock = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sock < 0) return MC_NO_SOCKET;
-  int flags = fcntl(sock, F_GETFL, 0);
-  if (flags >= 0) fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 #endif
 
   // Port 0: an ephemeral port. Responders then answer by unicast to it
@@ -154,7 +128,7 @@ mc_socket mc_open(const unsigned char local[4]) {
   bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
   bind_addr.sin_port = 0;
   if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
-    CLOSE_SOCKET(sock);
+    ns_close(sock);
     return MC_NO_SOCKET;
   }
 
@@ -185,7 +159,7 @@ int mc_send(mc_socket sock, const unsigned char ip[4], unsigned short port,
   dest.sin_family = AF_INET;
   dest.sin_port = htons(port);
   memcpy(&dest.sin_addr.s_addr, ip, 4);
-  int sent = (int)sendto((native_socket)sock, (const char *)buf, (int)len, 0,
+  int sent = (int)sendto((ns_socket)sock, (const char *)buf, (int)len, 0,
                          (struct sockaddr *)&dest, sizeof(dest));
   return sent == (int)len ? 0 : -1;
 }
@@ -193,45 +167,26 @@ int mc_send(mc_socket sock, const unsigned char ip[4], unsigned short port,
 int mc_recv(mc_socket sock, int timeout_ms, unsigned char *buf, size_t cap,
             unsigned char out_from[4]) {
   if (sock == MC_NO_SOCKET || !buf || !out_from) return -1;
-#ifdef _WIN32
-  SOCKET s = (SOCKET)sock;
-  fd_set rfds;
-  FD_ZERO(&rfds);
-  FD_SET(s, &rfds);
-  struct timeval tv = {
-      .tv_sec = timeout_ms / 1000,
-      .tv_usec = (timeout_ms % 1000) * 1000,
-  };
-  int ready = select(0, &rfds, NULL, NULL, &tv);
+  ns_socket s = (ns_socket)sock;
+  int ready = ns_wait_readable(s, timeout_ms);
   if (ready == 0) return 0;
   if (ready < 0) return -1;
   struct sockaddr_in from;
-  int from_len = sizeof(from);
-  int n = recvfrom(s, (char *)buf, (int)cap, 0, (struct sockaddr *)&from, &from_len);
+  ns_socklen from_len = sizeof(from);
+  int n = (int)recvfrom(s, (char *)buf, (int)cap, 0, (struct sockaddr *)&from, &from_len);
   if (n < 0) {
-    // Raced by nothing, or a datagram larger than the buffer: neither
-    // ends the listener.
+    // Raced by nothing, a datagram larger than the buffer, or an ICMP
+    // error for an earlier send: none of them ends the listener.
+#ifdef _WIN32
     int err = WSAGetLastError();
     return (err == WSAEWOULDBLOCK || err == WSAEMSGSIZE || err == WSAECONNRESET) ? 0 : -1;
-  }
 #else
-  int s = (int)sock;
-  struct pollfd pfd = {.fd = s, .events = POLLIN, .revents = 0};
-  // A signal (Ctrl+C, a terminal resize) cuts the wait short with
-  // EINTR; report "nothing yet" and let the caller's loop wait again.
-  int ready = poll(&pfd, 1, timeout_ms);
-  if (ready == 0) return 0;
-  if (ready < 0) return errno == EINTR ? 0 : -1;
-  struct sockaddr_in from;
-  socklen_t from_len = sizeof(from);
-  ssize_t n = recvfrom(s, buf, cap, 0, (struct sockaddr *)&from, &from_len);
-  if (n < 0) {
     return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ||
             errno == ECONNREFUSED)
                ? 0
                : -1;
-  }
 #endif
+  }
   if (from.sin_family != AF_INET) return 0;
   memcpy(out_from, &from.sin_addr.s_addr, 4);
   return (int)n;
@@ -241,16 +196,12 @@ void mc_wake(mc_socket sock) {
   if (sock == MC_NO_SOCKET) return;
   struct sockaddr_in self;
   memset(&self, 0, sizeof(self));
-#ifdef _WIN32
-  int self_len = sizeof(self);
-#else
-  socklen_t self_len = sizeof(self);
-#endif
-  if (getsockname((native_socket)sock, (struct sockaddr *)&self, &self_len) != 0) return;
+  ns_socklen self_len = sizeof(self);
+  if (getsockname((ns_socket)sock, (struct sockaddr *)&self, &self_len) != 0) return;
   self.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  sendto((native_socket)sock, "", 0, 0, (struct sockaddr *)&self, sizeof(self));
+  sendto((ns_socket)sock, "", 0, 0, (struct sockaddr *)&self, sizeof(self));
 }
 
 void mc_close(mc_socket sock) {
-  if (sock != MC_NO_SOCKET) CLOSE_SOCKET((native_socket)sock);
+  if (sock != MC_NO_SOCKET) ns_close((ns_socket)sock);
 }
