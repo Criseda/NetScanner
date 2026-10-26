@@ -32,6 +32,9 @@ pub fn build(b: *std.Build) void {
         },
     });
     linkNativeDeps(b, test_module, target);
+    // The C side's view of the types c_bindings.zig declares by hand,
+    // checked against Zig's in tests/c_bindings_test.zig.
+    test_module.addCSourceFile(.{ .file = b.path("tests/c_layout.c"), .flags = &[_][]const u8{"-Wall"} });
     const main_tests = b.addTest(.{ .root_module = test_module });
 
     const run_tests = b.addRunArtifact(main_tests);
