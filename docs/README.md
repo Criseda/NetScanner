@@ -292,6 +292,36 @@ zig build test --summary all
 CI runs the same two commands on Linux, macOS and Windows (see
 `.github/workflows/ci.yml`).
 
+### Failures in sandboxes and cloud agents
+
+The suite talks to the real network stack: it binds loopback ports,
+connects, pings, opens multicast sockets and reads the neighbor table.
+It assumes an ordinary machine, one with a working loopback and a
+plain LAN or no network at all. Containers, CI sandboxes and cloud
+coding agents (Claude Code on the web and similar) often have network
+setups no ordinary machine has, and some tests can then fail although
+`ns` is fine. Tests skip what an environment cannot do (no free port,
+no unprivileged ping), but they cannot tell an unusual network from a
+broken `ns`.
+
+Seen so far: a cloud agent's sandbox put its own `eth0` at
+`192.0.2.2/24`, with its gateway at `192.0.2.1` (#90). Several tests
+use TEST-NET-1 (`192.0.2.0/24`) as the range no machine is ever on:
+there, a connect to `192.0.2.1` was refused instead of timing out, and
+`MulticastSocket.localAddress` found the subnet attached. Other setups
+that could break tests the same way:
+
+- an egress proxy or firewall that answers, resets or drops every
+  outbound connect itself;
+- ICMP, multicast or the neighbor table filtered, emulated or missing;
+- a loopback with unusual limits on ports, sockets or open files.
+
+When the suite fails in such an environment, run it on an ordinary
+machine (or let CI run it) before you change anything. If it passes
+there, the environment is the cause: say so in the PR, and leave the
+test alone instead of skipping or loosening it to suit that sandbox.
+A failure on an ordinary machine is a real bug either way.
+
 ## Release builds
 
 Maintainers build all five release binaries with:

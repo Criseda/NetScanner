@@ -39,6 +39,13 @@ PR. Create the section if it is missing.
   the stream and hang the runner with no output. `std.debug.print`
   (stderr) is fine. Scans take `stream_results = false` exactly so
   tests can run quietly; the streaming output is verified manually.
+- Cloud agents and other sandboxes may fail the suite because of
+  their unusual network setup, not because of `ns` (one put its own
+  interface on TEST-NET-1, which tests treat as unassigned). Do not
+  skip or loosen a test to make such a sandbox pass; say in the PR
+  which tests failed and why, and let CI or an ordinary machine
+  decide. See "Failures in sandboxes and cloud agents" in
+  `docs/README.md`.
 
 ## Performance changes
 
