@@ -489,7 +489,7 @@ fn start(target: Target) Started {
         .addr = @bitCast(target.ip),
     };
     const rc = std.c.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
-    const outcome: Outcome = if (rc == 0) .open else switch (std.c.errno(rc)) {
+    const outcome: Outcome = if (rc == 0) connected(fd) else switch (std.c.errno(rc)) {
         // In progress. An interrupted connect carries on in the
         // background just the same.
         .INPROGRESS, .INTR => return .{ .pending = fd },
@@ -535,7 +535,27 @@ fn finish(sock: Socket, settled: bool) Outcome {
         return .filtered;
     }
     if (!settled and so_error == 0) return .filtered;
+    if (so_error == 0) return connected(sock);
     return classify(so_error);
+}
+
+/// The verdict on a connect that succeeded: open, unless it reached
+/// its own socket. When a connect to one of the machine's own
+/// addresses happens to get the target port as its source port, the
+/// OS completes it as a simultaneous open with itself, so it succeeds
+/// with nothing listening. `ns -p 127.0.0.1 1-65535` reported such
+/// phantom ports, inside the ephemeral range, in most runs on Linux
+/// and in some on Windows (#90). Nothing answered, so it counts as
+/// refused.
+fn connected(fd: std.posix.fd_t) Outcome {
+    var local: std.posix.sockaddr.in = undefined;
+    var peer: std.posix.sockaddr.in = undefined;
+    var local_len: std.posix.socklen_t = @sizeOf(@TypeOf(local));
+    var peer_len: std.posix.socklen_t = @sizeOf(@TypeOf(peer));
+    if (std.c.getsockname(fd, @ptrCast(&local), &local_len) != 0) return .open;
+    if (std.c.getpeername(fd, @ptrCast(&peer), &peer_len) != 0) return .open;
+    const self = local.port == peer.port and local.addr == peer.addr;
+    return if (self) .refused else .open;
 }
 
 /// POSIX: only an actively refused connection proves "closed but

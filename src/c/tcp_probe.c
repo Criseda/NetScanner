@@ -28,6 +28,25 @@ static tcp_probe_result classify(int so_error) {
   }
 }
 
+// The verdict on a connect that succeeded: open, unless it reached its
+// own socket (local address and port equal the peer's). A connect to
+// one of the machine's own addresses that gets the target port as its
+// source port can complete as a simultaneous open with itself, with
+// nothing listening; see connected() in src/core/connects.zig.
+static tcp_probe_result connected(SOCKET sock) {
+  struct sockaddr_in local;
+  struct sockaddr_in peer;
+  int local_len = sizeof(local);
+  int peer_len = sizeof(peer);
+  if (getsockname(sock, (struct sockaddr *)&local, &local_len) != 0 ||
+      getpeername(sock, (struct sockaddr *)&peer, &peer_len) != 0) {
+    return TCP_PROBE_OPEN;
+  }
+  const int self = local.sin_port == peer.sin_port &&
+                   local.sin_addr.s_addr == peer.sin_addr.s_addr;
+  return self ? TCP_PROBE_REFUSED : TCP_PROBE_OPEN;
+}
+
 // Make a refusal surface the moment its RST arrives. By default Windows
 // treats a RST to its SYN as a reason to try again, retransmitting the
 // SYN twice before reporting "refused" -- about 2s later, every time,
@@ -72,8 +91,9 @@ tcp_probe_result tcp_probe_start(const unsigned char ip[4], unsigned short port,
   memcpy(&addr.sin_addr, ip, 4);
 
   if (connect(sock, (const struct sockaddr *)&addr, sizeof(addr)) == 0) {
+    const tcp_probe_result verdict = connected(sock);
     closesocket(sock);
-    return TCP_PROBE_OPEN;
+    return verdict;
   }
   const int connect_error = WSAGetLastError();
   if (connect_error != WSAEWOULDBLOCK) {
@@ -177,11 +197,16 @@ tcp_probe_result tcp_probe_finish(uintptr_t raw_sock, int settled) {
   int opt_len = sizeof(so_error);
   const int read_failed =
       getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&so_error, &opt_len) != 0;
-  closesocket(sock);
+  tcp_probe_result verdict;
   if (read_failed || (!settled && so_error == 0)) {
-    return TCP_PROBE_FILTERED;
+    verdict = TCP_PROBE_FILTERED;
+  } else if (so_error == 0) {
+    verdict = connected(sock);
+  } else {
+    verdict = classify(so_error);
   }
-  return classify(so_error);
+  closesocket(sock);
+  return verdict;
 }
 
 #endif

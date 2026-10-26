@@ -33,6 +33,16 @@
   macOS was not measured: the change is in the scan's own
   bookkeeping, the same on every OS, and the opening burst there is
   smaller (128 probes, not 256).
+- `ns -p` on the machine's own address no longer reports ports that
+  nothing listens on. A connect to one of its own addresses can get
+  the target port as its source port, and the OS then completes it as
+  a simultaneous open with itself (#90). `ns -p 127.0.0.1 1-65535`
+  reported such phantom ports, inside the ephemeral range, on Linux
+  (WSL2) in 10 of 15 runs (one port each), and on Windows 11 in 3 of
+  12 (10 to 61 ports each); now in none of 15 and 12, at the same
+  speed. A connect that reached its own socket now counts as closed.
+  The check runs only on connects that succeed: two system calls per
+  open port. macOS was not checked.
 - `ns -p` tries the ports most often found open first, most likely
   first, then the rest of the range in port order. Some hosts
   rate-limit SYNs and answer only the first dozen or so of a burst; a
