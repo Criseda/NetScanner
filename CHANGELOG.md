@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- `ns -p` retries the ports it probed before the host's first answer.
+  Those probes have no learned wait yet, so they waited the full 500 ms
+  once and were never retried; with the most often open ports going
+  first, they are also the likeliest to be open, and one lost SYN lost
+  them for good (#90). Once the host has answered quickly enough to
+  count as near, each of them still unanswered gets a second try in the
+  retry pass, at the learned wait. A far host (no answer faster than
+  100 ms) is unchanged.
+  Linux (WSL2) on loopback, 15 open ports, 1-65535, SYNs dropped with
+  iptables, ReleaseFast, old (`main`) and new interleaved in one random
+  order, medians (p90):
+  - first SYN to port 22 dropped (6 runs each): old missed 22 in every
+    run, new in none; 0.502s both.
+  - 5% of SYNs dropped at random (30 each): old missed a port in 10 of
+    30 runs (22, 53, 80, 443, 8443, 40000), new in none; 0.745s
+    (0.789s) -> 0.733s (0.791s).
+  - no drops (30 each): 0.116s (0.130s) -> 0.113s (0.127s).
+  - closed ports dropped, a host whose retry pass runs anyway (three
+    batches, 52 runs each): 13.70s, 13.70s, 13.69s -> 13.89s (12
+    runs), 13.71s, 13.74s, with 15-19s outliers on both sides; new
+    makes 102 more connects of 131k.
+  Windows 11, wired, 5 s of quiet before each run:
+  - scanme.nmap.org 1-1024 (8 each): 0.723s (0.745s) -> 0.721s
+    (0.735s); 22 and 80 every run.
+  - home router 1-1024, which drops closed ports (two batches, 10 and
+    15 each): 0.883s (0.891s) -> 0.901s (0.917s), then 0.886s (0.898s)
+    -> 0.889s (0.904s); 80 and 443 every run, its rate-limited 53 in
+    25 of 25 runs and 24 of 25.
+  macOS was not measured: the change is in the scan's own
+  bookkeeping, the same on every OS, and the opening burst there is
+  smaller (128 probes, not 256).
 - `ns -p` tries the ports most often found open first, most likely
   first, then the rest of the range in port order. Some hosts
   rate-limit SYNs and answer only the first dozen or so of a burst; a
