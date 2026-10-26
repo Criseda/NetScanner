@@ -281,13 +281,20 @@ const PortProbe = struct {
     /// A first try with a learned wait: if unanswered, the port gets a
     /// second try in the retry pass instead of counting as not open.
     deferrable: bool,
+    /// A first try sent before the host had answered anything, so with
+    /// no learned wait to use (see PortScan.firstTry).
+    blind: bool = false,
 };
 
 /// A port whose first try went unanswered, waiting for its second.
 const Deferred = struct {
     port: u16,
-    /// How long the try before waited: at most half of PORT_TIMEOUT_MS.
+    /// How long the try before waited: at most half of PORT_TIMEOUT_MS,
+    /// unless the try was blind.
     waited_ms: u32,
+    /// The first try went out blind and waited the full
+    /// PORT_TIMEOUT_MS, so the second gets a learned wait of its own.
+    blind: bool = false,
 };
 
 /// One port scan's state: the source connects.run pulls ports from and
@@ -346,8 +353,11 @@ const PortScan = struct {
                 // The wait learned by now, but never more than the
                 // first try left of PORT_TIMEOUT_MS: if the link slowed
                 // down meanwhile, the two tries together still wait no
-                // longer than one fixed timeout would have.
-                const timeout_ms = @min(self.estimator.timeoutMs(), PORT_TIMEOUT_MS - deferred.waited_ms);
+                // longer than one fixed timeout would have. A blind
+                // first try left nothing, yet still earned a second
+                // (see firstTry).
+                const left_ms = if (deferred.blind) PORT_TIMEOUT_MS else PORT_TIMEOUT_MS - deferred.waited_ms;
+                const timeout_ms = @min(self.estimator.timeoutMs(), left_ms);
                 return self.probe(deferred.port, timeout_ms, false);
             },
             .third => {
@@ -441,12 +451,36 @@ const PortScan = struct {
     /// all answered their second try, and that second pass cost more
     /// than the shorter waits saved (#71). So a far host gets the full
     /// wait too.
+    ///
+    /// The probes sent before the host's first answer have no learned
+    /// wait yet, so they wait the full PORT_TIMEOUT_MS too. They are
+    /// the scan's opening burst, a few hundred (connects.POOL_PACE),
+    /// and with the ports most often open going first (nextFirstPort)
+    /// they are also the ones most likely to be open: a single lost
+    /// SYN there lost port 22 in every run that dropped it. So once
+    /// the host has turned out near, a blind try left unanswered gets
+    /// a second one after all (see done). It costs one learned wait,
+    /// and only when such a port was silent; a far host, where silence
+    /// nearly always meant a slow refusal, still gets none.
     fn firstTry(self: *PortScan, port: u16) PortProbe {
         if (self.fixed_ms) |ms| return self.probe(port, ms, false);
+        if (self.fastest_answer_us == std.math.maxInt(u64)) {
+            var blind = self.probe(port, PORT_TIMEOUT_MS, false);
+            blind.blind = true;
+            return blind;
+        }
+        if (self.learnedWait()) |learned_ms| return self.probe(port, learned_ms, true);
+        return self.probe(port, PORT_TIMEOUT_MS, false);
+    }
+
+    /// The learned wait, when the host is near and two tries of it fit
+    /// in PORT_TIMEOUT_MS (see firstTry); null when a port gets the
+    /// full wait once instead.
+    fn learnedWait(self: *const PortScan) ?u32 {
         const learned_ms = self.estimator.timeoutMs();
         const far = self.fastest_answer_us > PORT_TIMEOUT_FLOOR_MS * std.time.us_per_ms;
-        if (far or 2 * learned_ms > PORT_TIMEOUT_MS) return self.probe(port, PORT_TIMEOUT_MS, false);
-        return self.probe(port, learned_ms, true);
+        if (far or 2 * learned_ms > PORT_TIMEOUT_MS) return null;
+        return learned_ms;
     }
 
     fn probe(self: *PortScan, port: u16, timeout_ms: u32, deferrable: bool) PortProbe {
@@ -485,8 +519,10 @@ const PortScan = struct {
         switch (outcome) {
             .open => self.recordOpen(port),
             .refused => {},
-            .filtered => if (p.deferrable) {
-                self.retries.appendAssumeCapacity(.{ .port = port, .waited_ms = p.target.timeout_ms });
+            // A blind try ends a full wait after it went out, by when a
+            // near host has long since answered something.
+            .filtered => if (p.deferrable or (p.blind and self.learnedWait() != null)) {
+                self.retries.appendAssumeCapacity(.{ .port = port, .waited_ms = p.target.timeout_ms, .blind = p.blind });
                 self.advanceHalves(1);
                 return;
             },
