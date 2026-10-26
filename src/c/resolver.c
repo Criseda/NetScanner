@@ -165,10 +165,11 @@ int query_netbios(const char *ip_address, char *out_buf, size_t out_len,
   close(sock);
 #endif
 
-  // Verify the packet actually came from our target IP, ignoring any stray broadcast traffic.
+  // A failed recvfrom (-1) leaves `from` unwritten, so the length comes
+  // first. Then verify the packet actually came from our target IP,
+  // ignoring any stray broadcast traffic.
+  if (recv_len < 57 || (size_t)from_len < sizeof(from)) return -1;
   if (from.sin_addr.s_addr != dest.sin_addr.s_addr) return -1;
-
-  if (recv_len < 57) return -1;
   if (resp[0] != 0x13 || resp[1] != 0x37) return -1;
 
   int num_names = (int)resp[56];
@@ -381,10 +382,11 @@ int query_mdns(const char *ip_address, char *out_buf, size_t out_len, int timeou
   close(sock);
 #endif
 
-  // Verify the response originated from our target IP (discards rogue LAN multicast echoes).
+  // A failed recvfrom (-1) leaves `from` unwritten, so the length comes
+  // first. Then verify the response originated from our target IP
+  // (discards rogue LAN multicast echoes).
+  if (recv_len < 12 || (size_t)from_len < sizeof(from)) return -1;
   if (from.sin_addr.s_addr != dest.sin_addr.s_addr) return -1;
-
-  if (recv_len < 12) return -1;
   int qdcount = (resp[4] << 8) | resp[5];
   int ancount = (resp[6] << 8) | resp[7];
   if (ancount == 0) return -1;
