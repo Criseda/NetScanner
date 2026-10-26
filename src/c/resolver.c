@@ -4,65 +4,22 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <WinSock2.h>
-#include <ws2tcpip.h>
-#include <Windows.h>
-#include <iphlpapi.h>
-#include "win_wsa.h"
-#else
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <errno.h>
-#include <time.h>
-#endif
+#include "ns_socket.h"
 
-#ifndef _WIN32
-/* Wait up to timeout_ms for `sock` to turn readable: 1 if it did, 0 on
- * timeout or error. A signal handler running on this thread makes poll()
- * fail with EINTR, and poll is never restarted, even under SA_RESTART.
- * ns runs two while its status line is up (Ctrl+C, and the SIGWINCH
- * redraw on a terminal resize), so retry with whatever time is left
- * instead of dropping an answer that is still on its way. */
-static int wait_readable(int sock, int timeout_ms) {
-  struct timespec start;
-  clock_gettime(CLOCK_MONOTONIC, &start);
-  struct pollfd pfd = {.fd = sock, .events = POLLIN, .revents = 0};
-  int left = timeout_ms;
-  for (;;) {
-    int rc = poll(&pfd, 1, left);
-    if (rc > 0) return 1;
-    if (rc == 0 || errno != EINTR) return 0;
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L +
-                      (now.tv_nsec - start.tv_nsec) / 1000000L;
-    left = timeout_ms - (int)elapsed_ms;
-    if (left <= 0) return 0;
-  }
-}
+#ifdef _WIN32
+#include <iphlpapi.h>
+#else
+#include <netdb.h>
 #endif
 
 int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len) {
-#ifdef _WIN32
-  win_wsa_init_once();
-#endif
+  ns_socket_init();
   if (!ip_address || !out_buf || out_len == 0) return -1;
 
   struct sockaddr_in sa;
   memset(&sa, 0, sizeof(sa));
   sa.sin_family = AF_INET;
-#ifdef _WIN32
-  if (InetPtonA(AF_INET, ip_address, &sa.sin_addr) != 1) return -1;
-#else
-  if (inet_pton(AF_INET, ip_address, &sa.sin_addr) != 1) return -1;
-#endif
+  if (ns_inet_pton(ip_address, &sa.sin_addr) != 1) return -1;
 
   int ret = getnameinfo((struct sockaddr *)&sa, sizeof(sa), out_buf,
                         (socklen_t)out_len, NULL, 0, NI_NAMEREQD);
@@ -72,36 +29,9 @@ int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len) {
 int query_netbios(const char *ip_address, char *out_buf, size_t out_len,
                   int timeout_ms) {
   if (!ip_address || !out_buf || out_len == 0 || timeout_ms <= 0) return -1;
-#ifdef _WIN32
-  win_wsa_init_once();
-  SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (sock == INVALID_SOCKET) return -1;
-
-  u_long nonblocking = 1;
-  ioctlsocket(sock, FIONBIO, &nonblocking);
-#else
-  int sock = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sock < 0) return -1;
-
-  int flags = fcntl(sock, F_GETFL, 0);
-  if (flags >= 0) fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-#endif
-
-  struct sockaddr_in dest;
-  memset(&dest, 0, sizeof(dest));
-  dest.sin_family = AF_INET;
-  dest.sin_port = htons(137);
-#ifdef _WIN32
-  if (InetPtonA(AF_INET, ip_address, &dest.sin_addr) != 1) {
-    closesocket(sock);
-    return -1;
-  }
-#else
-  if (inet_pton(AF_INET, ip_address, &dest.sin_addr) != 1) {
-    close(sock);
-    return -1;
-  }
-#endif
+  ns_socket_init();
+  struct in_addr addr;
+  if (ns_inet_pton(ip_address, &addr) != 1) return -1;
 
   // RFC 1002 Node Status Request (50 bytes)
   static const unsigned char request[50] = {
@@ -121,55 +51,12 @@ int query_netbios(const char *ip_address, char *out_buf, size_t out_len,
       0x00, 0x01              // Class: IN
   };
 
-  int sent = sendto(sock, (const char *)request, sizeof(request), 0,
-                    (struct sockaddr *)&dest, sizeof(dest));
-  if (sent != sizeof(request)) {
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
-    return -1;
-  }
-
-#ifdef _WIN32
-  fd_set rfds;
-  FD_ZERO(&rfds);
-  FD_SET(sock, &rfds);
-  struct timeval tv = {
-      .tv_sec = timeout_ms / 1000,
-      .tv_usec = (timeout_ms % 1000) * 1000,
-  };
-  if (select(0, &rfds, NULL, NULL, &tv) <= 0) {
-    closesocket(sock);
-    return -1;
-  }
-#else
-  if (!wait_readable(sock, timeout_ms)) {
-    close(sock);
-    return -1;
-  }
-#endif
-  struct sockaddr_in from;
-#ifdef _WIN32
-  int from_len = sizeof(from);
-#else
-  socklen_t from_len = sizeof(from);
-#endif
+  // udp_exchange has already checked that the reply came from our
+  // target IP, ignoring any stray broadcast traffic.
   unsigned char resp[1024];
-  int recv_len = recvfrom(sock, (char *)resp, sizeof(resp), 0,
-                          (struct sockaddr *)&from, &from_len);
-#ifdef _WIN32
-  closesocket(sock);
-#else
-  close(sock);
-#endif
-
-  // A failed recvfrom (-1) leaves `from` unwritten, so the length comes
-  // first. Then verify the packet actually came from our target IP,
-  // ignoring any stray broadcast traffic.
-  if (recv_len < 57 || (size_t)from_len < sizeof(from)) return -1;
-  if (from.sin_addr.s_addr != dest.sin_addr.s_addr) return -1;
+  int recv_len = udp_exchange((const unsigned char *)&addr.s_addr, 137, request,
+                              sizeof(request), resp, sizeof(resp), timeout_ms);
+  if (recv_len < 57) return -1;
   if (resp[0] != 0x13 || resp[1] != 0x37) return -1;
 
   int num_names = (int)resp[56];
@@ -215,20 +102,8 @@ int udp_exchange(const unsigned char ip[4], unsigned short port,
                  const unsigned char *req, size_t req_len, unsigned char *resp,
                  size_t cap, int timeout_ms) {
   if (!ip || !req || !resp || cap == 0 || timeout_ms <= 0) return -1;
-#ifdef _WIN32
-  win_wsa_init_once();
-  SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (sock == INVALID_SOCKET) return -1;
-
-  u_long nonblocking = 1;
-  ioctlsocket(sock, FIONBIO, &nonblocking);
-#else
-  int sock = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sock < 0) return -1;
-
-  int flags = fcntl(sock, F_GETFL, 0);
-  if (flags >= 0) fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-#endif
+  ns_socket sock = ns_udp_socket();
+  if (sock == NS_NO_SOCKET) return -1;
 
   struct sockaddr_in dest;
   memset(&dest, 0, sizeof(dest));
@@ -238,47 +113,16 @@ int udp_exchange(const unsigned char ip[4], unsigned short port,
 
   int sent = sendto(sock, (const char *)req, (int)req_len, 0,
                     (struct sockaddr *)&dest, sizeof(dest));
-  if (sent != (int)req_len) {
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
+  if (sent != (int)req_len || ns_wait_readable(sock, timeout_ms) != 1) {
+    ns_close(sock);
     return -1;
   }
-
-#ifdef _WIN32
-  fd_set rfds;
-  FD_ZERO(&rfds);
-  FD_SET(sock, &rfds);
-  struct timeval tv = {
-      .tv_sec = timeout_ms / 1000,
-      .tv_usec = (timeout_ms % 1000) * 1000,
-  };
-  if (select(0, &rfds, NULL, NULL, &tv) <= 0) {
-    closesocket(sock);
-    return -1;
-  }
-#else
-  if (!wait_readable(sock, timeout_ms)) {
-    close(sock);
-    return -1;
-  }
-#endif
 
   struct sockaddr_in from;
-#ifdef _WIN32
-  int from_len = sizeof(from);
-#else
-  socklen_t from_len = sizeof(from);
-#endif
+  ns_socklen from_len = sizeof(from);
   int recv_len = recvfrom(sock, (char *)resp, (int)cap, 0,
                           (struct sockaddr *)&from, &from_len);
-#ifdef _WIN32
-  closesocket(sock);
-#else
-  close(sock);
-#endif
+  ns_close(sock);
 
   // A failed recvfrom (-1) leaves `from` unwritten, so the length comes
   // first. Then verify the reply came from the host we asked (discards

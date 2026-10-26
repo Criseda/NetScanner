@@ -33,8 +33,8 @@ int mc_send(mc_socket sock, const unsigned char ip[4], unsigned short port,
             const unsigned char *buf, size_t len);
 
 // Wait up to timeout_ms for one datagram. Returns its length (with the
-// sender in out_from), 0 when nothing arrived in time (or a signal cut
-// the wait short), or -1 on a socket error.
+// sender in out_from), 0 when nothing arrived in time, or -1 on a
+// socket error. A signal arriving mid-wait does not cut it short.
 int mc_recv(mc_socket sock, int timeout_ms, unsigned char *buf, size_t cap,
             unsigned char out_from[4]);
 
