@@ -541,11 +541,12 @@ fn finish(sock: Socket, settled: bool) Outcome {
 
 /// The verdict on a connect that succeeded: open, unless it reached
 /// its own socket. When a connect to one of the machine's own
-/// addresses happens to get the target port as its source port, Linux
-/// completes it as a simultaneous open with itself, so it succeeds
-/// with nothing listening. `ns -p 127.0.0.1 1-65535` reported such a
-/// phantom port, a different one inside the ephemeral range, in 22 of
-/// 30 runs (#90). Nothing answered, so it counts as refused.
+/// addresses happens to get the target port as its source port, the
+/// OS completes it as a simultaneous open with itself, so it succeeds
+/// with nothing listening. `ns -p 127.0.0.1 1-65535` reported such
+/// phantom ports, inside the ephemeral range, in most runs on Linux
+/// and in some on Windows (#90). Nothing answered, so it counts as
+/// refused.
 fn connected(fd: std.posix.fd_t) Outcome {
     var local: std.posix.sockaddr.in = undefined;
     var peer: std.posix.sockaddr.in = undefined;
