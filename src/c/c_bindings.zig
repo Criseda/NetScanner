@@ -38,6 +38,9 @@ pub const NeighborRow = extern struct {
     state: u8,
 };
 
+/// NS_NEIGH_REACHABLE from neighbors.h; any other state is stale.
+pub const NS_NEIGH_REACHABLE = 1;
+
 /// How sure the kernel is that a neighbor is there right now.
 pub const NeighborState = enum {
     /// Confirmed within the last few seconds: proof enough on its own.
@@ -68,8 +71,7 @@ pub fn dumpNeighbors(allocator: std.mem.Allocator) ?[]Neighbor {
         neighbor.* = .{
             .ip = row.ip,
             .mac = if (row.has_mac != 0) row.mac else null,
-            // NS_NEIGH_REACHABLE; anything else is NS_NEIGH_STALE.
-            .state = if (row.state == 1) .reachable else .stale,
+            .state = if (row.state == NS_NEIGH_REACHABLE) .reachable else .stale,
         };
     }
     return neighbors;
@@ -151,6 +153,9 @@ pub fn tcpProbeFinish(sock: usize, settled: bool) TcpProbe {
     };
 }
 
+/// MC_NO_SOCKET from multicast.h: mc_open failed.
+pub const MC_NO_SOCKET: i64 = -1;
+
 /// A UDP socket for multicast discovery (see src/c/multicast.h).
 pub const MulticastSocket = struct {
     handle: i64,
@@ -166,7 +171,7 @@ pub const MulticastSocket = struct {
     /// Null when the socket cannot be set up.
     pub fn open(local: [4]u8) ?MulticastSocket {
         const handle = c.mc_open(&local);
-        if (handle == -1) return null;
+        if (handle == MC_NO_SOCKET) return null;
         return .{ .handle = handle };
     }
 
@@ -205,13 +210,17 @@ pub const IcmpObserver = extern struct {
 
 pub const IcmpSweep = enum { done, unavailable };
 
+/// icmp_ping_result values from icmp_ping.h; any other is out of memory.
+pub const ICMP_PING_DONE = 0;
+pub const ICMP_PING_UNAVAILABLE = 1;
+
 /// Ping every IP from one ICMP socket inside the process (see
 /// icmp_ping.h). `.unavailable` means nothing was sent: this system
 /// does not allow unprivileged ICMP sockets, so ping(1) has to do it.
 pub fn icmpPingSweep(ips: []const [4]u8, timeout_ms: c_int, max_in_flight: usize, observer: *const IcmpObserver) error{OutOfMemory}!IcmpSweep {
     return switch (c.icmp_ping_sweep(ips.ptr, ips.len, timeout_ms, max_in_flight, observer)) {
-        0 => .done,
-        1 => .unavailable,
+        ICMP_PING_DONE => .done,
+        ICMP_PING_UNAVAILABLE => .unavailable,
         else => error.OutOfMemory,
     };
 }

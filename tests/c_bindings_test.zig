@@ -79,3 +79,68 @@ test "icmpPingSweep: a stop before the start pings nobody" {
     try recorder.sweep(&.{ .{ 127, 0, 0, 1 }, .{ 127, 0, 0, 1 } }, 16);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, recorder.reports[0..2]);
 }
+
+/// The C compiler's view of what c_bindings.zig declares by hand, from
+/// tests/c_layout.c.
+const layout = struct {
+    extern const layout_ns_neighbor_size: usize;
+    extern const layout_ns_neighbor_align: usize;
+    extern const layout_ns_neighbor_ip: usize;
+    extern const layout_ns_neighbor_mac: usize;
+    extern const layout_ns_neighbor_has_mac: usize;
+    extern const layout_ns_neighbor_state: usize;
+    extern const layout_ns_neigh_reachable: c_int;
+
+    extern const layout_icmp_observer_size: usize;
+    extern const layout_icmp_observer_align: usize;
+    extern const layout_icmp_observer_ctx: usize;
+    extern const layout_icmp_observer_pinged: usize;
+    extern const layout_icmp_observer_stop_requested: usize;
+    extern const layout_icmp_ping_done: c_int;
+    extern const layout_icmp_ping_unavailable: c_int;
+
+    extern const layout_tcp_probe_open: c_int;
+    extern const layout_tcp_probe_refused: c_int;
+    extern const layout_tcp_probe_filtered: c_int;
+    extern const layout_tcp_probe_pending: c_int;
+    extern const layout_tcp_probe_max_sockets: c_int;
+
+    extern const layout_mc_socket_size: usize;
+    extern const layout_mc_no_socket: i64;
+};
+
+test "NeighborRow matches ns_neighbor in neighbors.h" {
+    const Row = c_bindings.NeighborRow;
+    try std.testing.expectEqual(layout.layout_ns_neighbor_size, @sizeOf(Row));
+    try std.testing.expectEqual(layout.layout_ns_neighbor_align, @alignOf(Row));
+    try std.testing.expectEqual(layout.layout_ns_neighbor_ip, @offsetOf(Row, "ip"));
+    try std.testing.expectEqual(layout.layout_ns_neighbor_mac, @offsetOf(Row, "mac"));
+    try std.testing.expectEqual(layout.layout_ns_neighbor_has_mac, @offsetOf(Row, "has_mac"));
+    try std.testing.expectEqual(layout.layout_ns_neighbor_state, @offsetOf(Row, "state"));
+    try std.testing.expectEqual(layout.layout_ns_neigh_reachable, c_bindings.NS_NEIGH_REACHABLE);
+}
+
+test "IcmpObserver matches icmp_ping_observer in icmp_ping.h" {
+    const Observer = c_bindings.IcmpObserver;
+    try std.testing.expectEqual(layout.layout_icmp_observer_size, @sizeOf(Observer));
+    try std.testing.expectEqual(layout.layout_icmp_observer_align, @alignOf(Observer));
+    try std.testing.expectEqual(layout.layout_icmp_observer_ctx, @offsetOf(Observer, "ctx"));
+    try std.testing.expectEqual(layout.layout_icmp_observer_pinged, @offsetOf(Observer, "pinged"));
+    try std.testing.expectEqual(layout.layout_icmp_observer_stop_requested, @offsetOf(Observer, "stop_requested"));
+    try std.testing.expectEqual(layout.layout_icmp_ping_done, c_bindings.ICMP_PING_DONE);
+    try std.testing.expectEqual(layout.layout_icmp_ping_unavailable, c_bindings.ICMP_PING_UNAVAILABLE);
+}
+
+test "TcpProbe and TCP_PROBE_MAX_SOCKETS match tcp_probe.h" {
+    const TcpProbe = c_bindings.TcpProbe;
+    try std.testing.expectEqual(layout.layout_tcp_probe_open, @backingInt(TcpProbe.open));
+    try std.testing.expectEqual(layout.layout_tcp_probe_refused, @backingInt(TcpProbe.refused));
+    try std.testing.expectEqual(layout.layout_tcp_probe_filtered, @backingInt(TcpProbe.filtered));
+    try std.testing.expectEqual(layout.layout_tcp_probe_pending, @backingInt(TcpProbe.pending));
+    try std.testing.expectEqual(layout.layout_tcp_probe_max_sockets, c_bindings.TCP_PROBE_MAX_SOCKETS);
+}
+
+test "MulticastSocket's handle matches mc_socket in multicast.h" {
+    try std.testing.expectEqual(layout.layout_mc_socket_size, @sizeOf(@FieldType(c_bindings.MulticastSocket, "handle")));
+    try std.testing.expectEqual(layout.layout_mc_no_socket, c_bindings.MC_NO_SOCKET);
+}
