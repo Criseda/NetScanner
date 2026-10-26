@@ -183,6 +183,39 @@ test "run reports open and refused loopback ports, each exactly once" {
     }
 }
 
+test "run never reports a loopback port open that nothing listens on" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    // A free port from the ephemeral range. Connecting to it over and
+    // over, a connect sooner or later gets it as its own source port,
+    // and on Linux completes with itself (#90). Linux hands connects
+    // even source ports and bind(0) odd ones, so the port is the even
+    // one next to what bind(0) picked: an odd port never self-connects.
+    var picked = bindLoopbackAbove(io, 0, 0) orelse return error.SkipZigTest;
+    const port = picked.server.socket.address.getPort() & ~@as(u16, 1);
+    picked.server.deinit(io);
+    var free = bindLoopbackAbove(io, port, 0) orelse return error.SkipZigTest;
+    free.server.deinit(io);
+
+    // 40k tries go through the range's ~14k even ports nearly three
+    // times over, with room for the ports busy at the time. Before the
+    // fix this failed in every run on Linux.
+    const tries = 40_000;
+    const ports = try allocator.alloc(u16, tries);
+    defer allocator.free(ports);
+    @memset(ports, port);
+    const outcomes = try allocator.alloc(?connects.Outcome, tries);
+    defer allocator.free(outcomes);
+    @memset(outcomes, null);
+    var recorder: Recorder = .{ .ports = ports, .outcomes = outcomes };
+
+    try connects.run(Recorder.Job, allocator, io, &recorder, .fixed);
+    try std.testing.expectEqual(ports.len, recorder.reports);
+    for (outcomes) |o| try std.testing.expect(o.? != .open);
+}
+
 test "run with nothing to do returns at once" {
     var outcomes: [0]?connects.Outcome = .{};
     var recorder: Recorder = .{ .ports = &.{}, .outcomes = &outcomes };

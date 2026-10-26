@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `ns -p` on the machine's own address no longer reports ports that
+  nothing listens on. A connect to one of its own addresses can get
+  the target port as its source port, and Linux then completes it as
+  a simultaneous open with itself; `ns -p 127.0.0.1 1-65535` reported
+  such a phantom port, a different one inside the ephemeral range, in
+  22 of 30 runs (#90). A connect that reached its own socket now
+  counts as closed. The check runs only on connects that succeed: two
+  system calls per open port.
 - `ns -p` tries the ports most often found open first, most likely
   first, then the rest of the range in port order. Some hosts
   rate-limit SYNs and answer only the first dozen or so of a burst; a
