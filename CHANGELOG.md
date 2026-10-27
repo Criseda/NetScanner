@@ -6,12 +6,15 @@
   up to half the cores. A connect to a closed port on the machine
   itself is refused inside the connect call, under the kernel's TCP
   locks, so more threads only waited on each other. On an 11-core Mac
-  (5 threads before), ReleaseFast, thread counts interleaved in one
-  random order, medians (p90): `ns -p 127.0.0.1 1-65535` (30 runs
-  each) 0.594s (0.847s) -> 0.427s (0.543s), with kernel CPU 2.56s ->
-  1.15s; the router's full range (6 each) 45.0s -> 43.9s, the same
-  five ports every run; router 1-1024 and `ns -s` on a /23 unchanged.
-  Linux and Windows are not measured yet and keep their thread count.
+  (5 threads before), ReleaseFast, interleaved in one random order,
+  medians (p90): `ns -p 127.0.0.1 1-65535` (30 runs each) 0.646s
+  (1.100s) -> 0.570s (0.784s), back to v1.7.0's 0.558s (0.777s), with
+  kernel CPU 2.75s -> 1.45s; in a sweep of 1-5 threads (30 each), 3
+  were fastest, 0.427s against 0.594s for 5. The router's full range
+  (6 each) 45.0s -> 43.9s, the same five ports every run; router
+  1-1024, scanme.nmap.org 1-1024 and `ns -s` on a /23 unchanged, the
+  same ports and hosts found. Linux and Windows are not measured yet
+  and keep their thread count.
 
 - The per-host mDNS name lookup (`--hostname`) reads the reply with the
   same parser as the multicast listener, and the C one is gone (#91). A
