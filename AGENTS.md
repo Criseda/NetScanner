@@ -53,7 +53,9 @@ PR. Create the section if it is missing.
   more hosts and open ports. Compare ReleaseFast builds, old and new
   interleaved in random order (not hyperfine: it runs one side's batch
   after the other's, so network drift lands on one side), 10+ runs
-  each, medians and p90.
+  each, medians and p90. On Linux, `scripts/bench.py` does this
+  against the Docker lab's lossy, filtering and far targets (see
+  `docker/README.md`).
 - Your network is one data point. Prefer signals the scan observes
   (answers, round trips, kernel state) over constants fitted to one
   router. Say in the PR which networks and OSes were measured and

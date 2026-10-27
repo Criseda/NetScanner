@@ -9,14 +9,18 @@ ARG TARGETARCH
 
 # Compiler (zig links libc and compiles the C helpers), downloader,
 # and the network tools the scanner and its ground-truth checks need:
-# ping for the --ping path, ip for setup. No net-tools: ns reads the
-# neighbor table over netlink instead of running `arp -a`.
+# ping for the --ping path, ip for setup, git and python3 for
+# scripts/bench.py (building the old side, running the comparison).
+# No net-tools: ns reads the neighbor table over netlink instead of
+# running `arp -a`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
+    git \
     iproute2 \
     iputils-ping \
+    python3 \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
