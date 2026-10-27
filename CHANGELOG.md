@@ -18,6 +18,18 @@
   same 5 names in every run of all three. `ns -s` unchanged, 0.565s.
   Not measured on Linux or macOS, where only the shared wait applies.
 
+- A scan's threads take their ports and report their verdicts a batch
+  at a time, one lock per batch instead of two per port (#105). Round
+  trips are still measured when each answer arrives, so the learned
+  wait and the window see the same times. ReleaseFast, interleaved,
+  medians (p90): Linux (WSL2) `ns -p 127.0.0.1 1-65535` (20 each)
+  0.099s (0.109s) -> 0.077s (0.091s); Docker lab clean target 1-65535
+  (12 each) 0.167s (0.184s) -> 0.152s (0.166s), lossy and first-syn-lost
+  within noise. Windows 11 loopback 1-65535 (12 each), the router's
+  full range (10 each) and scanme.nmap.org 1-1024 (16 each) unchanged:
+  there the connects' system calls or the network set the pace. Same
+  ports found everywhere. Not measured on macOS.
+
 - On macOS, scans spread their connects over at most 3 threads, not
   up to half the cores. A connect to a closed port on the machine
   itself is refused inside the connect call, under the kernel's TCP

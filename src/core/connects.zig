@@ -292,7 +292,15 @@ pub const Window = struct {
     }
 };
 
+/// One connect's verdict, on its way back to the source.
+fn Settled(comptime Job: type) type {
+    return struct { job: Job, outcome: Outcome, elapsed_us: u64 };
+}
+
 /// A run's `source` and Window, shared by its loops: one call at a time.
+/// A loop takes its connects and reports their verdicts a batch at a
+/// time, one lock for each batch: a lock per connect cost two
+/// round-trips between threads for every port, 130k on a full range.
 fn Shared(comptime Job: type, comptime Source: type) type {
     return struct {
         source: Source,
@@ -301,27 +309,37 @@ fn Shared(comptime Job: type, comptime Source: type) type {
         window: Window,
         mutex: std.Io.Mutex = .init,
 
-        const Take = union(enum) {
-            job: Job,
-            /// This loop holds its share of the window already.
-            full,
+        const Taken = struct {
+            count: usize,
             /// The source has no more.
-            dry,
+            dry: bool,
         };
 
-        /// The next connect for a loop that has `in_flight` going.
-        fn take(self: *@This(), in_flight: usize) Take {
+        /// The next connects, into `out`, for a loop that has
+        /// `in_flight` going: as many as its share of the window has
+        /// room for, `out.len` at most.
+        fn take(self: *@This(), in_flight: usize, out: []Job) Taken {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            if (in_flight >= @max(1, self.window.size / self.loops)) return .full;
-            return if (self.source.next()) |job| .{ .job = job } else .dry;
+            const share = @max(1, self.window.size / self.loops);
+            const room = @min(out.len, share -| in_flight);
+            for (out[0..room], 0..) |*job, i| {
+                job.* = self.source.next() orelse return .{ .count = i, .dry = true };
+            }
+            return .{ .count = room, .dry = false };
         }
 
-        fn done(self: *@This(), job: Job, outcome: Outcome, elapsed_us: u64) void {
+        /// Report verdicts that all came in by `now_ns`: their round
+        /// trips were measured then, so reporting them together adds
+        /// nothing to them.
+        fn done(self: *@This(), settled: []const Settled(Job), now_ns: i96) void {
+            if (settled.len == 0) return;
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            self.window.observe(outcome, elapsed_us, nowNs(self.io));
-            self.source.done(job, outcome, elapsed_us);
+            for (settled) |s| {
+                self.window.observe(s.outcome, s.elapsed_us, now_ns);
+                self.source.done(s.job, s.outcome, s.elapsed_us);
+            }
         }
     };
 }
@@ -335,30 +353,33 @@ fn loopDetached(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, sh
 fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: anytype, capacity: usize) !void {
     var flight = try Flight(Job).init(allocator, capacity);
     defer flight.deinit(allocator);
+    // Verdicts waiting to be reported together: at most what is in
+    // flight, or a batch that settled as it started.
+    const settled = try allocator.alloc(Settled(Job), capacity);
+    defer allocator.free(settled);
 
     var dry = false;
     while (true) {
         // Top up, a batch at a time, while the window has room.
         var room_left = false;
-        var batch: usize = 0;
-        while (!dry and flight.len < flight.jobs.len) : (batch += 1) {
-            if (batch == START_BATCH) {
-                room_left = true;
-                break;
+        if (!dry and flight.len < flight.jobs.len) {
+            var batch: [START_BATCH]Job = undefined;
+            const most = @min(START_BATCH, flight.jobs.len - flight.len);
+            const taken = shared.take(flight.len, batch[0..most]);
+            dry = taken.dry;
+            room_left = !dry and taken.count == START_BATCH;
+            var count: usize = 0;
+            for (batch[0..taken.count]) |job| {
+                const started = nowNs(io);
+                switch (start(job.target)) {
+                    .done => |outcome| {
+                        settled[count] = .{ .job = job, .outcome = outcome, .elapsed_us = elapsedUs(started, nowNs(io)) };
+                        count += 1;
+                    },
+                    .pending => |sock| flight.add(job, sock, started),
+                }
             }
-            const job: Job = switch (shared.take(flight.len)) {
-                .job => |job| job,
-                .full => break,
-                .dry => {
-                    dry = true;
-                    break;
-                },
-            };
-            const started = nowNs(io);
-            switch (start(job.target)) {
-                .done => |outcome| shared.done(job, outcome, elapsedUs(started, nowNs(io))),
-                .pending => |sock| flight.add(job, sock, started),
-            }
+            shared.done(settled[0..count], nowNs(io));
         }
         if (flight.len == 0) {
             if (dry) return;
@@ -374,17 +395,21 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
         // Report everything that settled or ran out of time. Walking
         // backwards keeps swap-removal from skipping a slot.
         const after = nowNs(io);
+        var count: usize = 0;
         var i = flight.len;
         while (i > 0) {
             i -= 1;
-            const settled = flight.settled[i] != 0;
-            if (!settled and after < flight.deadlines[i]) continue;
-            const outcome = finish(flight.socks[i], settled);
-            const job = flight.jobs[i];
-            const elapsed = elapsedUs(flight.started[i], after);
+            const answered = flight.settled[i] != 0;
+            if (!answered and after < flight.deadlines[i]) continue;
+            settled[count] = .{
+                .job = flight.jobs[i],
+                .outcome = finish(flight.socks[i], answered),
+                .elapsed_us = elapsedUs(flight.started[i], after),
+            };
+            count += 1;
             flight.remove(i);
-            shared.done(job, outcome, elapsed);
         }
+        shared.done(settled[0..count], after);
     }
 }
 
