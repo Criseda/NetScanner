@@ -16,8 +16,8 @@
   same ports and hosts found.
 
 - On Windows, scans spread their connects over at most 4 threads, not
-  up to 8. Past four, each connect's system calls cost more kernel
-  time and the scan slowed down again. On a 24-thread i9-12900K
+  up to 8. On the one machine measured, more than four slowed the scan
+  down again, with more kernel CPU. On a 24-thread i9-12900K
   (Windows 11, 8 threads before), ReleaseFast, 1-8 threads interleaved
   in one random order, medians (p90): `ns -p 127.0.0.1 1-65535` (30
   runs each) 2.86s (3.02s) -> 2.45s (2.52s), kernel CPU 10.1s -> 7.9s;

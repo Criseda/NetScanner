@@ -145,12 +145,14 @@ const MAX_LOOPS = 8;
 const MAX_LOOPS_MACOS = 3;
 
 /// MAX_LOOPS on Windows. Its connects' system calls do run in parallel,
-/// but only up to a point: past four loops each connect costs more
-/// kernel time and the scan slows down again. On a 24-thread i9-12900K,
-/// `ns -p 127.0.0.1 1-65535` took 2.45s with 4 loops against 2.86s with
-/// 8 (and 7.6s with 1), the kernel CPU rising from 7.9s to 10.1s; a
+/// but on the one machine measured, a 24-thread i9-12900K, the scan
+/// was fastest with four loops and slowed down again past them:
+/// `ns -p 127.0.0.1 1-65535` took 2.45s with 4 against 2.86s with 8
+/// (and 7.6s with 1), the kernel CPU rising from 7.9s to 10.1s. Why is
+/// not known; that CPU's slower efficiency cores may play a part. A
 /// router's 1-1024 took the same 0.88s with 1 to 8. Linux keeps
-/// MAX_LOOPS: there loopback kept getting faster up to 6-8 loops.
+/// MAX_LOOPS: there (WSL2, same machine) loopback kept getting faster
+/// up to 6-8 loops.
 const MAX_LOOPS_WINDOWS = 4;
 
 fn loopCount() usize {
