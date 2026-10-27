@@ -1,7 +1,24 @@
 # One-command virtual LAN for NetScanner validation.
 # See docker/README.md. Brings up two neighbours (a quiet box and a
 # port-80 box) plus the scanner image; the gateway (.1) comes free.
+# `--profile bench` adds the benchmark targets (lossy, filtering, ...)
+# that scripts/bench.py scans.
 name: netscanner-lab
+
+# A benchmark target: listens on the ports in lab.env and shapes its
+# own traffic per PROFILE (see target.sh). NET_ADMIN is for iptables
+# and tc inside its own network namespace only. Fixed addresses high
+# in the subnet keep clear of the ones Docker hands out from .2 up,
+# and match TARGETS in scripts/bench.py.
+x-target: &target
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.target
+  image: netscanner-target
+  env_file: lab.env
+  cap_add:
+    - NET_ADMIN
+  profiles: [bench]
 
 services:
   # Interactive shell with the repo mounted: run zig build, tests, scans.
@@ -36,6 +53,55 @@ services:
     command: ["httpd", "-f", "-p", "80"]
     networks:
       lantest:
+
+  # No shaping: the baseline for the others.
+  clean:
+    <<: *target
+    environment:
+      PROFILE: clean
+    networks:
+      lantest:
+        ipv4_address: 192.168.90.200
+
+  # 5% of incoming SYNs dropped at random.
+  lossy:
+    <<: *target
+    environment:
+      PROFILE: lossy
+      LOSS: "0.05"
+    networks:
+      lantest:
+        ipv4_address: 192.168.90.201
+
+  # SYNs to closed ports dropped, like a home router.
+  filtering:
+    <<: *target
+    environment:
+      PROFILE: filtering
+    networks:
+      lantest:
+        ipv4_address: 192.168.90.202
+
+  # The first SYN to port 22 in every scan dropped (#90).
+  first-syn-lost:
+    <<: *target
+    environment:
+      PROFILE: first-syn-lost
+      FIRST_SYN_PORT: "22"
+      FIRST_SYN_WINDOW: "1"
+    networks:
+      lantest:
+        ipv4_address: 192.168.90.203
+
+  # 80 ms added to every round trip (needs sch_netem in the kernel).
+  far:
+    <<: *target
+    environment:
+      PROFILE: far
+      DELAY: 80ms
+    networks:
+      lantest:
+        ipv4_address: 192.168.90.204
 
 networks:
   lantest:

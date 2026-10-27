@@ -1,0 +1,12 @@
+# A benchmark target for the Docker lab: listens on the ports in
+# docker/lab.env and shapes its own traffic with iptables or tc (see
+# docker/target.sh). Needs NET_ADMIN in its own network namespace only.
+FROM alpine:3.20
+
+# busybox-extras for httpd (one listener per open port), iptables for
+# SYN drops, iproute2-tc for netem delay.
+RUN apk add --no-cache busybox-extras iptables iproute2-tc
+
+COPY docker/target.sh /usr/local/bin/target.sh
+RUN chmod +x /usr/local/bin/target.sh
+ENTRYPOINT ["/usr/local/bin/target.sh"]
