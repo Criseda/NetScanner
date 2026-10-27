@@ -223,6 +223,63 @@ test "run with nothing to do returns at once" {
     try std.testing.expectEqual(@as(usize, 0), recorder.reports);
 }
 
+/// Hands out one silent connect that may be cut short (TEST-NET-1,
+/// never routed) and a loopback one that is refused at once, and
+/// offers `cap_ms` as its waitCap once something has answered.
+const Cutter = struct {
+    cap_ms: ?u32,
+    index: usize = 0,
+    answered: bool = false,
+    silent_elapsed_us: ?u64 = null,
+
+    const Job = struct { target: connects.Target };
+    const silent_timeout_ms = 3000;
+
+    pub fn next(self: *Cutter) ?Job {
+        defer self.index += 1;
+        return switch (self.index) {
+            0 => .{ .target = .{ .ip = .{ 192, 0, 2, 1 }, .port = 80, .timeout_ms = silent_timeout_ms, .cut_floor_ms = 100 } },
+            // Port 9 (discard): loopback refuses it.
+            1 => .{ .target = .{ .ip = .{ 127, 0, 0, 1 }, .port = 9, .timeout_ms = silent_timeout_ms } },
+            else => null,
+        };
+    }
+
+    pub fn done(self: *Cutter, job: Job, outcome: connects.Outcome, elapsed_us: u64) void {
+        if (job.target.cut_floor_ms != null) {
+            self.silent_elapsed_us = elapsed_us;
+        } else if (outcome != .filtered) {
+            self.answered = true;
+        }
+    }
+
+    pub fn waitCap(self: *const Cutter) ?u32 {
+        return if (self.answered) self.cap_ms else null;
+    }
+
+    /// How long the silent connect waited, in milliseconds. Skips when
+    /// it failed at once: some networks refuse TEST-NET-1 outright
+    /// instead of leaving it silent, and there is nothing to cut.
+    fn silentMs(self: *Cutter) !u64 {
+        if (builtin.single_threaded) return error.SkipZigTest;
+        try connects.run(Job, std.testing.allocator, std.testing.io, self, .fixed);
+        const elapsed_ms = self.silent_elapsed_us.? / std.time.us_per_ms;
+        if (elapsed_ms < 100) return error.SkipZigTest;
+        return elapsed_ms;
+    }
+};
+
+test "run cuts a silent connect short once the source has a wait for it" {
+    var cutter: Cutter = .{ .cap_ms = 200 };
+    // Cut at 200 ms; far from its own 3s however slow the machine.
+    try std.testing.expect(try cutter.silentMs() < Cutter.silent_timeout_ms / 2);
+}
+
+test "run lets a connect that may be cut wait in full while the source has no wait" {
+    var cutter: Cutter = .{ .cap_ms = null };
+    try std.testing.expect(try cutter.silentMs() >= Cutter.silent_timeout_ms - 100);
+}
+
 test "inFlightLimit allows at least one connect and at most MAX_IN_FLIGHT" {
     const limit = connects.inFlightLimit();
     try std.testing.expect(limit >= 1 and limit <= connects.MAX_IN_FLIGHT);

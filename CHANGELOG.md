@@ -18,6 +18,32 @@
   same 5 names in every run of all three. `ns -s` unchanged, 0.565s.
   Not measured on Linux or macOS, where only the shared wait applies.
 
+- `ns -p` no longer holds its opening burst for the full 500 ms on a
+  host that drops some of it (#106). The probes sent before the host's
+  first answer had no learned wait, so each unanswered one waited 500
+  ms, and since they fill the window, the scan waited with them: a
+  router that drops closed ports took 0.9s for 1-1024, and a scan
+  whose first SYN to port 22 was lost took 0.5s however few ports it
+  covered. They already get a second try once the host turns out near,
+  so now they wait the learned wait too, and until the burst has had
+  no answer for that long: its answers queue, and on a host 80 ms away
+  they came in over 100-126 ms, past the 121 ms learned from them. A
+  far host (no answer under 100 ms) is unchanged.
+  ReleaseFast, old and new interleaved in one random order, medians
+  (p90), every open port found in every run unless noted:
+  - Docker lab (Linux), 1-1024 (16 each): first SYN to 22 lost 0.503s
+    (0.504s) -> 0.103s (0.125s); closed ports dropped 0.806s (0.870s)
+    -> 0.638s (0.677s); 80 ms away (30 each) 0.275s (0.299s) -> 0.279s
+    (0.311s), within noise. 1-65535 (12 each): first SYN lost 0.503s
+    -> 0.159s; 5% loss and clean within noise.
+  - Windows 11, wired: home router 1-1024 (12 each) 0.882s (0.891s) ->
+    0.714s (0.725s), its rate-limited port 53 in 3 of 12 runs against
+    0 of 12; a Raspberry Pi 1-1024 (20 each), scanme.nmap.org 1-1024
+    (14 each) and loopback 1-65535 (10 each) unchanged.
+  Not measured on macOS. Sweeps (`ns -s`) keep their fixed 500 ms: one
+  probe per address and no retry, so no observed signal says an
+  address that has not answered yet never will.
+
 - A scan's threads take their ports and report their verdicts a batch
   at a time, one lock per batch instead of two per port (#105). Round
   trips are still measured when each answer arrives, so the learned

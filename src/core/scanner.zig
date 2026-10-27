@@ -462,15 +462,32 @@ const PortScan = struct {
     /// a second one after all (see done). It costs one learned wait,
     /// and only when such a port was silent; a far host, where silence
     /// nearly always meant a slow refusal, still gets none.
+    ///
+    /// Since such a try gets a second one anyway, it need not wait out
+    /// PORT_TIMEOUT_MS either: once the host has turned out near, it
+    /// waits the learned wait, and then until the opening burst has
+    /// had no answer for that long (see waitCap and connects.Cut).
+    /// On a host that drops closed ports, the opening burst used to
+    /// hold its slots for the full wait and set the end of a short
+    /// scan: a router's 1-1024 took 0.9s, and a scan whose first SYN
+    /// to port 22 was lost took 0.5s however few ports it covered.
     fn firstTry(self: *PortScan, port: u16) PortProbe {
         if (self.fixed_ms) |ms| return self.probe(port, ms, false);
         if (self.fastest_answer_us == std.math.maxInt(u64)) {
             var blind = self.probe(port, PORT_TIMEOUT_MS, false);
             blind.blind = true;
+            blind.target.cut_floor_ms = PORT_TIMEOUT_FLOOR_MS;
             return blind;
         }
         if (self.learnedWait()) |learned_ms| return self.probe(port, learned_ms, true);
         return self.probe(port, PORT_TIMEOUT_MS, false);
+    }
+
+    /// How long a blind first try needs to wait (connects.run cuts it
+    /// short to this): the learned wait, once the host has turned out
+    /// near (see firstTry).
+    pub fn waitCap(self: *const PortScan) ?u32 {
+        return self.learnedWait();
     }
 
     /// The learned wait, when the host is near and two tries of it fit
@@ -520,14 +537,21 @@ const PortScan = struct {
             .open => self.recordOpen(port),
             .refused => {},
             // A blind try ends a full wait after it went out, by when a
-            // near host has long since answered something.
-            .filtered => if (p.deferrable or (p.blind and self.learnedWait() != null)) {
+            // near host has long since answered something, or sooner,
+            // cut short because the host had (see waitCap).
+            .filtered => if (p.deferrable or (p.blind and (self.learnedWait() != null or cutShort(p, elapsed_us)))) {
                 self.retries.appendAssumeCapacity(.{ .port = port, .waited_ms = p.target.timeout_ms, .blind = p.blind });
                 self.advanceHalves(1);
                 return;
             },
         }
         self.advanceHalves(if (self.pass == .first) 2 else 1);
+    }
+
+    /// Whether a probe ended before its own wait did: connects.run cut
+    /// it short.
+    fn cutShort(p: PortProbe, elapsed_us: u64) bool {
+        return elapsed_us < @as(u64, p.target.timeout_ms) * std.time.us_per_ms;
     }
 
     fn recordOpen(self: *PortScan, port: u16) void {

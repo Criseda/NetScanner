@@ -31,6 +31,10 @@ pub const Target = struct {
     ip: [4]u8,
     port: u16,
     timeout_ms: u32,
+    /// Set: the wait may be cut short once the source has learned how
+    /// long the target takes to answer (its `waitCap`), but never below
+    /// this many milliseconds (see Cut).
+    cut_floor_ms: ?u32 = null,
 };
 
 /// Most connects one run keeps in flight. Enough that a scan is bound
@@ -90,6 +94,10 @@ pub fn inFlightLimit() usize {
 ///   with a `target: Target` field; it comes back unchanged in `done`.
 /// - `done(Job, Outcome, elapsed_us: u64)`: one connect's verdict, and
 ///   how long its answer took (for learning timeouts).
+/// - optionally `waitCap() ?u32`: how long, in milliseconds, a connect
+///   with a `cut_floor_ms` needs to wait now that the source has seen
+///   some answers (see Cut); null while it has no such wait. Asked
+///   after every batch of verdicts.
 ///
 /// The connects are shared out over up to MAX_LOOPS threads (see
 /// there), but calls into `source` are serialized, one at a time, so
@@ -297,6 +305,20 @@ fn Settled(comptime Job: type) type {
     return struct { job: Job, outcome: Outcome, elapsed_us: u64 };
 }
 
+/// How soon a connect with a `cut_floor_ms` may give up: once the
+/// source's learned wait (`wait_ms`, never below the floor) has passed
+/// both since it started and since such a connect last got an answer.
+/// Those connects are a burst sent before the target's first answer,
+/// and its answers queue: on a host 80 ms away they came in over
+/// 100-126 ms, past the 121 ms wait learned from them, and cutting
+/// those cost a retry pass (+26% on 1-1024). Waiting while the burst
+/// still gets answers keeps them; once it falls silent for a whole
+/// learned wait, the rest are lost.
+const Cut = struct {
+    wait_ms: ?u32,
+    last_answer_ns: i96,
+};
+
 /// A run's `source` and Window, shared by its loops: one call at a time.
 /// A loop takes its connects and reports their verdicts a batch at a
 /// time, one lock for each batch: a lock per connect cost two
@@ -308,6 +330,14 @@ fn Shared(comptime Job: type, comptime Source: type) type {
         loops: usize,
         window: Window,
         mutex: std.Io.Mutex = .init,
+        /// The source's waitCap, for the loops to read without the
+        /// lock; NO_CAP while it has none.
+        wait_cap_ms: std.atomic.Value(u32) = .init(NO_CAP),
+        /// When a connect that may be cut short last got an answer
+        /// (ns, nowNs's clock).
+        last_cuttable_answer_ns: std.atomic.Value(i64) = .init(0),
+
+        const NO_CAP = 0;
 
         const Taken = struct {
             count: usize,
@@ -339,7 +369,21 @@ fn Shared(comptime Job: type, comptime Source: type) type {
             for (settled) |s| {
                 self.window.observe(s.outcome, s.elapsed_us, now_ns);
                 self.source.done(s.job, s.outcome, s.elapsed_us);
+                if (s.outcome != .filtered and s.job.target.cut_floor_ms != null) {
+                    self.last_cuttable_answer_ns.store(@intCast(now_ns), .monotonic);
+                }
             }
+            if (comptime @hasDecl(std.meta.Child(Source), "waitCap")) {
+                self.wait_cap_ms.store(self.source.waitCap() orelse NO_CAP, .monotonic);
+            }
+        }
+
+        fn cut(self: *const @This()) Cut {
+            const cap = self.wait_cap_ms.load(.monotonic);
+            return .{
+                .wait_ms = if (cap == NO_CAP) null else cap,
+                .last_answer_ns = self.last_cuttable_answer_ns.load(.monotonic),
+            };
         }
     };
 }
@@ -389,18 +433,19 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
         // Sleep until something settles or the earliest deadline, or
         // just look, when the batch stopped short of the window.
         const now = nowNs(io);
-        const wait_ms = if (room_left) 0 else msUntil(now, flight.earliestDeadline());
+        const wait_ms = if (room_left) 0 else msUntil(now, flight.earliestWake(shared.cut(), now));
         waitSettled(flight.socks[0..flight.len], flight.fds, wait_ms, flight.settled[0..flight.len]);
 
         // Report everything that settled or ran out of time. Walking
         // backwards keeps swap-removal from skipping a slot.
         const after = nowNs(io);
+        const cut = shared.cut();
         var count: usize = 0;
         var i = flight.len;
         while (i > 0) {
             i -= 1;
             const answered = flight.settled[i] != 0;
-            if (!answered and after < flight.deadlines[i]) continue;
+            if (!answered and after < flight.deadline(i, cut)) continue;
             settled[count] = .{
                 .job = flight.jobs[i],
                 .outcome = finish(flight.socks[i], answered),
@@ -470,9 +515,36 @@ fn Flight(comptime Job: type) type {
             self.len = last;
         }
 
-        fn earliestDeadline(self: *const Self) i96 {
-            var earliest = self.deadlines[0];
-            for (self.deadlines[1..self.len]) |d| earliest = @min(earliest, d);
+        /// When connect `i` runs out of time: its own deadline, or, if
+        /// it may be cut short (see Target.cut_floor_ms), sooner as
+        /// `cut` allows.
+        fn deadline(self: *const Self, i: usize, cut: Cut) i96 {
+            const own = self.deadlines[i];
+            const floor = self.jobs[i].target.cut_floor_ms orelse return own;
+            const wait_ms = cut.wait_ms orelse return own;
+            const from = @max(self.started[i], cut.last_answer_ns);
+            return @min(own, from + @as(i96, @max(wait_ms, floor)) * std.time.ns_per_ms);
+        }
+
+        /// When to look at the connects again, at the latest: the
+        /// earliest deadline. A connect that may still be cut short is
+        /// looked at once its floor has passed too, even with no wait
+        /// to cut it to yet: the answer that sets one may reach another
+        /// loop, and nothing would wake this one before the full wait.
+        /// A host that has answered nothing by then is not near enough
+        /// for one, and the connect waits out its own deadline.
+        fn earliestWake(self: *const Self, cut: Cut, now: i96) i96 {
+            var earliest: i96 = std.math.maxInt(i96);
+            for (0..self.len) |i| {
+                var wake = self.deadline(i, cut);
+                if (cut.wait_ms == null) {
+                    if (self.jobs[i].target.cut_floor_ms) |floor| {
+                        const check = self.started[i] + @as(i96, floor) * std.time.ns_per_ms;
+                        if (check > now) wake = @min(wake, check);
+                    }
+                }
+                earliest = @min(earliest, wake);
+            }
             return earliest;
         }
     };
