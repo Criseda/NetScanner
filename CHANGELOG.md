@@ -13,8 +13,18 @@
   were fastest, 0.427s against 0.594s for 5. The router's full range
   (6 each) 45.0s -> 43.9s, the same five ports every run; router
   1-1024, scanme.nmap.org 1-1024 and `ns -s` on a /23 unchanged, the
-  same ports and hosts found. Linux and Windows are not measured yet
-  and keep their thread count.
+  same ports and hosts found.
+
+- On Windows, scans spread their connects over at most 4 threads, not
+  up to 8. Past four, each connect's system calls cost more kernel
+  time and the scan slowed down again. On a 24-thread i9-12900K
+  (Windows 11, 8 threads before), ReleaseFast, 1-8 threads interleaved
+  in one random order, medians (p90): `ns -p 127.0.0.1 1-65535` (30
+  runs each) 2.86s (3.02s) -> 2.45s (2.52s), kernel CPU 10.1s -> 7.9s;
+  the router's 1-1024 (10 each) 0.88s at every thread count, the same
+  three ports every run. Linux keeps up to 8: on the same machine
+  under WSL2, loopback kept getting faster up to 6-8 threads (0.097s,
+  against 0.115s with 4).
 
 - The per-host mDNS name lookup (`--hostname`) reads the reply with the
   same parser as the multicast listener, and the C one is gone (#91). A

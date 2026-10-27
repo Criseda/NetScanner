@@ -144,9 +144,22 @@ const MAX_LOOPS = 8;
 /// LAN host's full range included, took the same time with 3 as 5.
 const MAX_LOOPS_MACOS = 3;
 
+/// MAX_LOOPS on Windows. Its connects' system calls do run in parallel,
+/// but only up to a point: past four loops each connect costs more
+/// kernel time and the scan slows down again. On a 24-thread i9-12900K,
+/// `ns -p 127.0.0.1 1-65535` took 2.45s with 4 loops against 2.86s with
+/// 8 (and 7.6s with 1), the kernel CPU rising from 7.9s to 10.1s; a
+/// router's 1-1024 took the same 0.88s with 1 to 8. Linux keeps
+/// MAX_LOOPS: there loopback kept getting faster up to 6-8 loops.
+const MAX_LOOPS_WINDOWS = 4;
+
 fn loopCount() usize {
     const cpus = std.Thread.getCpuCount() catch 1;
-    const most: usize = if (builtin.os.tag == .macos) MAX_LOOPS_MACOS else MAX_LOOPS;
+    const most: usize = switch (builtin.os.tag) {
+        .macos => MAX_LOOPS_MACOS,
+        .windows => MAX_LOOPS_WINDOWS,
+        else => MAX_LOOPS,
+    };
     return std.math.clamp(cpus / 2, 1, most);
 }
 
