@@ -135,9 +135,34 @@ pub const POOL_PACE: usize = if (builtin.os.tag == .macos) 128 else 256;
 /// silent targets they change nothing: those wait on the network.
 const MAX_LOOPS = 8;
 
+/// MAX_LOOPS on macOS. There a connect to a closed port on the machine
+/// itself is refused inside the connect call, under the kernel's TCP
+/// locks, so loopback work does not spread over threads: past three,
+/// they mostly wait on each other. On an 11-core Mac, 5 loops took
+/// twice the kernel CPU of 3 and were 40% slower on `ns -p 127.0.0.1
+/// 1-65535`; 2 were slower again. Scans that wait on the network, a
+/// LAN host's full range included, took the same time with 3 as 5.
+const MAX_LOOPS_MACOS = 3;
+
+/// MAX_LOOPS on Windows. Its connects' system calls do run in parallel,
+/// but on the one machine measured, a 24-thread i9-12900K, the scan
+/// was fastest with four loops and slowed down again past them:
+/// `ns -p 127.0.0.1 1-65535` took 2.45s with 4 against 2.86s with 8
+/// (and 7.6s with 1), the kernel CPU rising from 7.9s to 10.1s. Why is
+/// not known; that CPU's slower efficiency cores may play a part. A
+/// router's 1-1024 took the same 0.88s with 1 to 8. Linux keeps
+/// MAX_LOOPS: there (WSL2, same machine) loopback kept getting faster
+/// up to 6-8 loops.
+const MAX_LOOPS_WINDOWS = 4;
+
 fn loopCount() usize {
     const cpus = std.Thread.getCpuCount() catch 1;
-    return std.math.clamp(cpus / 2, 1, MAX_LOOPS);
+    const most: usize = switch (builtin.os.tag) {
+        .macos => MAX_LOOPS_MACOS,
+        .windows => MAX_LOOPS_WINDOWS,
+        else => MAX_LOOPS,
+    };
+    return std.math.clamp(cpus / 2, 1, most);
 }
 
 /// Most connects a loop starts before it checks on the ones in flight.
