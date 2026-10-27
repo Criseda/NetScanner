@@ -105,6 +105,16 @@ const layout = struct {
     extern const layout_tcp_probe_pending: c_int;
     extern const layout_tcp_probe_max_sockets: c_int;
 
+    extern const layout_udp_exchange_size: usize;
+    extern const layout_udp_exchange_align: usize;
+    extern const layout_udp_exchange_req: usize;
+    extern const layout_udp_exchange_req_len: usize;
+    extern const layout_udp_exchange_resp: usize;
+    extern const layout_udp_exchange_cap: usize;
+    extern const layout_udp_exchange_resp_len: usize;
+    extern const layout_udp_exchange_port: usize;
+    extern const layout_ns_wait_max: c_int;
+
     extern const layout_mc_socket_size: usize;
     extern const layout_mc_no_socket: i64;
 };
@@ -138,6 +148,19 @@ test "TcpProbe and TCP_PROBE_MAX_SOCKETS match tcp_probe.h" {
     try std.testing.expectEqual(layout.layout_tcp_probe_filtered, @backingInt(TcpProbe.filtered));
     try std.testing.expectEqual(layout.layout_tcp_probe_pending, @backingInt(TcpProbe.pending));
     try std.testing.expectEqual(layout.layout_tcp_probe_max_sockets, c_bindings.TCP_PROBE_MAX_SOCKETS);
+}
+
+test "UdpExchange and UDP_EXCHANGE_MAX match resolver.h and ns_socket.h" {
+    const Exchange = c_bindings.UdpExchange;
+    try std.testing.expectEqual(layout.layout_udp_exchange_size, @sizeOf(Exchange));
+    try std.testing.expectEqual(layout.layout_udp_exchange_align, @alignOf(Exchange));
+    try std.testing.expectEqual(layout.layout_udp_exchange_req, @offsetOf(Exchange, "req"));
+    try std.testing.expectEqual(layout.layout_udp_exchange_req_len, @offsetOf(Exchange, "req_len"));
+    try std.testing.expectEqual(layout.layout_udp_exchange_resp, @offsetOf(Exchange, "resp"));
+    try std.testing.expectEqual(layout.layout_udp_exchange_cap, @offsetOf(Exchange, "cap"));
+    try std.testing.expectEqual(layout.layout_udp_exchange_resp_len, @offsetOf(Exchange, "resp_len"));
+    try std.testing.expectEqual(layout.layout_udp_exchange_port, @offsetOf(Exchange, "port"));
+    try std.testing.expectEqual(layout.layout_ns_wait_max, c_bindings.UDP_EXCHANGE_MAX);
 }
 
 test "MulticastSocket's handle matches mc_socket in multicast.h" {

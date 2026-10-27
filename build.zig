@@ -170,7 +170,8 @@ fn buildExe(
 /// Windows, links the system libraries they call: iphlpapi for SendARP
 /// (resolver.c), the neighbor table (neighbors.c), the adapter list
 /// (multicast.c) and IcmpSendEcho2 (icmp_ping.c), ws2_32 for Winsock
-/// (resolver.c, neighbors.c, tcp_probe.c, multicast.c).
+/// (resolver.c, neighbors.c, tcp_probe.c, multicast.c), dnsapi for
+/// reverse DNS (resolver.c).
 fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     mod.addCSourceFile(.{ .file = b.path("src/c/resolver.c"), .flags = &[_][]const u8{"-Wall"} });
     mod.addCSourceFile(.{ .file = b.path("src/c/neighbors.c"), .flags = &[_][]const u8{"-Wall"} });
@@ -184,6 +185,7 @@ fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.Resol
         mod.addCSourceFile(.{ .file = b.path("src/c/tcp_probe.c"), .flags = &[_][]const u8{"-Wall"} });
         mod.linkSystemLibrary("iphlpapi", .{});
         mod.linkSystemLibrary("ws2_32", .{});
+        mod.linkSystemLibrary("dnsapi", .{});
     }
 }
 

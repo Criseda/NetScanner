@@ -8,10 +8,45 @@
 
 #ifdef _WIN32
 #include <iphlpapi.h>
+#include <windns.h>
 #else
 #include <netdb.h>
 #endif
 
+#ifdef _WIN32
+// Windows asks DNS only. Its getnameinfo goes on, once DNS has no
+// name, to LLMNR and then NetBIOS over TCP/IP, and an address nobody
+// names took about 5s to give up (four routers, phones and smart
+// plugs on one LAN, every run): most of what `--hostname` added to a
+// sweep. ns sends its own NetBIOS and mDNS queries before this one,
+// so those fallbacks only asked the same hosts again, more slowly;
+// getnameinfo on Linux and macOS has none of them either.
+int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len) {
+  if (!ip_address || !out_buf || out_len == 0) return -1;
+  struct in_addr addr;
+  if (ns_inet_pton(ip_address, &addr) != 1) return -1;
+  const unsigned char *b = (const unsigned char *)&addr.s_addr;
+  char query[32];
+  snprintf(query, sizeof(query), "%u.%u.%u.%u.in-addr.arpa", b[3], b[2], b[1],
+           b[0]);
+
+  PDNS_RECORDA records = NULL;
+  DNS_STATUS status =
+      DnsQuery_A(query, DNS_TYPE_PTR,
+                 DNS_QUERY_STANDARD | DNS_QUERY_NO_NETBT | DNS_QUERY_NO_MULTICAST,
+                 NULL, (PDNS_RECORD *)&records, NULL);
+  if (status != 0 || !records) return -1;
+  int ret = -1;
+  for (PDNS_RECORDA r = records; r; r = r->pNext) {
+    if (r->wType != DNS_TYPE_PTR || !r->Data.PTR.pNameHost) continue;
+    snprintf(out_buf, out_len, "%s", r->Data.PTR.pNameHost);
+    ret = 0;
+    break;
+  }
+  DnsRecordListFree((PDNS_RECORD)records, DnsFreeRecordList);
+  return ret;
+}
+#else
 int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len) {
   ns_socket_init();
   if (!ip_address || !out_buf || out_len == 0) return -1;
@@ -25,111 +60,63 @@ int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len) {
                         (socklen_t)out_len, NULL, 0, NI_NAMEREQD);
   return (ret == 0) ? 0 : -1;
 }
+#endif
 
-int query_netbios(const char *ip_address, char *out_buf, size_t out_len,
-                  int timeout_ms) {
-  if (!ip_address || !out_buf || out_len == 0 || timeout_ms <= 0) return -1;
-  ns_socket_init();
-  struct in_addr addr;
-  if (ns_inet_pton(ip_address, &addr) != 1) return -1;
-
-  // RFC 1002 Node Status Request (50 bytes)
-  static const unsigned char request[50] = {
-      0x13, 0x37,             // Transaction ID
-      0x00, 0x00,             // Flags: Query
-      0x00, 0x01,             // QDCOUNT: 1
-      0x00, 0x00,             // ANCOUNT: 0
-      0x00, 0x00,             // NSCOUNT: 0
-      0x00, 0x00,             // ARCOUNT: 0
-      0x20,                   // Length 32
-      'C',  'K',              // NetBIOS wildcard '*' encoded
-      'A',  'A',  'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A',
-      'A',  'A',  'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A',
-      'A',  'A',  'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A',
-      0x00,                   // Terminator
-      0x00, 0x21,             // Type: NBSTAT
-      0x00, 0x01              // Class: IN
-  };
-
-  // udp_exchange has already checked that the reply came from our
-  // target IP, ignoring any stray broadcast traffic.
-  unsigned char resp[1024];
-  int recv_len = udp_exchange((const unsigned char *)&addr.s_addr, 137, request,
-                              sizeof(request), resp, sizeof(resp), timeout_ms);
-  if (recv_len < 57) return -1;
-  if (resp[0] != 0x13 || resp[1] != 0x37) return -1;
-
-  int num_names = (int)resp[56];
-  int offset = 57;
-
-  for (int i = 0; i < num_names; i++) {
-    if (offset + 18 > recv_len) break;
-    unsigned char suffix = resp[offset + 15];
-    unsigned short flags =
-        (unsigned short)((resp[offset + 16] << 8) | resp[offset + 17]);
-    int is_group = (flags & 0x8000) != 0;
-
-    if (!is_group && (suffix == 0x00 || suffix == 0x20)) {
-      int len = 15;
-      while (len > 0 && resp[offset + len - 1] == ' ') {
-        len--;
-      }
-      if (len > 0) {
-        // Enforce printable ASCII to prevent terminal escape sequence injection
-        int valid = 1;
-        for (int j = 0; j < len; j++) {
-          unsigned char c = resp[offset + j];
-          if (c < 32 || c > 126) {
-            valid = 0;
-            break;
-          }
-        }
-        if (!valid) continue;
-
-        if ((size_t)len >= out_len) len = (int)(out_len - 1);
-        memcpy(out_buf, &resp[offset], len);
-        out_buf[len] = '\0';
-        return 0;
-      }
-    }
-    offset += 18;
-  }
-
-  return -1;
-}
-
-int udp_exchange(const unsigned char ip[4], unsigned short port,
-                 const unsigned char *req, size_t req_len, unsigned char *resp,
-                 size_t cap, int timeout_ms) {
-  if (!ip || !req || !resp || cap == 0 || timeout_ms <= 0) return -1;
-  ns_socket sock = ns_udp_socket();
-  if (sock == NS_NO_SOCKET) return -1;
+void udp_exchange_all(const unsigned char ip[4], ns_udp_exchange *xs, int count,
+                      int timeout_ms) {
+  if (!xs || count <= 0) return;
+  for (int i = 0; i < count; i++) xs[i].resp_len = -1;
+  if (!ip || count > NS_WAIT_MAX || timeout_ms <= 0) return;
 
   struct sockaddr_in dest;
   memset(&dest, 0, sizeof(dest));
   dest.sin_family = AF_INET;
-  dest.sin_port = htons(port);
   memcpy(&dest.sin_addr.s_addr, ip, 4);
 
-  int sent = sendto(sock, (const char *)req, (int)req_len, 0,
-                    (struct sockaddr *)&dest, sizeof(dest));
-  if (sent != (int)req_len || ns_wait_readable(sock, timeout_ms) != 1) {
-    ns_close(sock);
-    return -1;
+  // Each request gets a socket connected to its port, so only that
+  // port's reply reaches it, and an ICMP port unreachable comes back
+  // as an error on it (on every OS: an unconnected socket hears of one
+  // only on Windows). waiting[] holds the sockets still waiting, and
+  // owner[] which request each belongs to.
+  ns_socket waiting[NS_WAIT_MAX];
+  int owner[NS_WAIT_MAX];
+  int pending = 0;
+  for (int i = 0; i < count; i++) {
+    ns_socket sock = ns_udp_socket();
+    if (sock == NS_NO_SOCKET) continue;
+    dest.sin_port = htons(xs[i].port);
+    if (connect(sock, (struct sockaddr *)&dest, sizeof(dest)) != 0 ||
+        send(sock, (const char *)xs[i].req, (int)xs[i].req_len, 0) != (int)xs[i].req_len) {
+      ns_close(sock);
+      continue;
+    }
+    waiting[pending] = sock;
+    owner[pending] = i;
+    pending++;
   }
 
-  struct sockaddr_in from;
-  ns_socklen from_len = sizeof(from);
-  int recv_len = recvfrom(sock, (char *)resp, (int)cap, 0,
-                          (struct sockaddr *)&from, &from_len);
-  ns_close(sock);
-
-  // A failed recvfrom (-1) leaves `from` unwritten, so the length comes
-  // first. Then verify the reply came from the host we asked (discards
-  // stray LAN multicast that happened to reach this port).
-  if (recv_len < 0 || (size_t)from_len < sizeof(from)) return -1;
-  if (from.sin_addr.s_addr != dest.sin_addr.s_addr) return -1;
-  return recv_len;
+  long long deadline = ns_now_ms() + timeout_ms;
+  while (pending > 0) {
+    long long left = deadline - ns_now_ms();
+    int ready[NS_WAIT_MAX];
+    if (left <= 0 || ns_wait_any(waiting, pending, (int)left, ready) <= 0) break;
+    // Backwards, so moving the last socket into a settled one's slot
+    // never skips one.
+    for (int j = pending - 1; j >= 0; j--) {
+      if (!ready[j]) continue;
+      ns_udp_exchange *x = &xs[owner[j]];
+      int n = recv(waiting[j], (char *)x->resp, (int)x->cap, 0);
+      // Nothing there after all: keep waiting. Otherwise a reply, or
+      // an error (the port refused), settles this request.
+      if (n < 0 && ns_would_block()) continue;
+      x->resp_len = n;
+      ns_close(waiting[j]);
+      pending--;
+      waiting[j] = waiting[pending];
+      owner[j] = owner[pending];
+    }
+  }
+  for (int j = 0; j < pending; j++) ns_close(waiting[j]);
 }
 
 char *read_file_content(const char *path, size_t *out_len) {

@@ -9,21 +9,27 @@
 /// Returns 0 on success with a null-terminated hostname in out_buf, -1 on failure.
 int resolve_ptr(const char *ip_address, char *out_buf, size_t out_len);
 
-/// Query NetBIOS Node Status (RFC 1002, UDP port 137) with a bounded timeout.
-/// Discovers Windows workstation names, Samba file servers, and NAS appliances
-/// that ignore standard DNS PTR requests.
-/// Returns 0 on success with a null-terminated name in out_buf, -1 on timeout/failure.
-int query_netbios(const char *ip_address, char *out_buf, size_t out_len, int timeout_ms);
+/// One request of udp_exchange_all: `req` goes to the host's `port`,
+/// and its reply, if any, lands in `resp`.
+typedef struct {
+  const unsigned char *req;
+  size_t req_len;
+  unsigned char *resp;
+  size_t cap;
+  /// Set by udp_exchange_all: the reply's length, or -1 for none.
+  int resp_len;
+  unsigned short port;
+} ns_udp_exchange;
 
-/// Send one UDP datagram to ip:port (4 bytes, network order) from an
-/// ephemeral port and wait up to timeout_ms for one reply from that same
-/// address. Used for the per-host unicast mDNS name query, whose packets
-/// src/core/multicast.zig builds and parses. Returns the reply's length
-/// in resp, or -1 on timeout or failure (on Windows, also at once when
-/// the host answers with an ICMP port unreachable).
-int udp_exchange(const unsigned char ip[4], unsigned short port,
-                 const unsigned char *req, size_t req_len, unsigned char *resp,
-                 size_t cap, int timeout_ms);
+/// Send each of `xs` (at most NS_WAIT_MAX) to its port on `ip` (4 bytes,
+/// network order) at once, and wait up to timeout_ms for their replies.
+/// Returns as soon as every request has its reply or was refused (an
+/// ICMP port unreachable), so a host with neither service costs a round
+/// trip, not the whole wait. Used for the per-host name queries
+/// (NetBIOS, unicast mDNS), whose packets src/core/resolver.zig and
+/// src/core/multicast.zig build and parse.
+void udp_exchange_all(const unsigned char ip[4], ns_udp_exchange *xs, int count,
+                      int timeout_ms);
 
 /// Read an entire file into a newly allocated buffer using standard C stdio.
 /// Used for loading custom Wireshark or IEEE OUI databases cross-platform

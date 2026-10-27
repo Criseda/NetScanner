@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- `--hostname` takes a fraction of the time it did, most of all on
+  Windows (#107). There the reverse DNS lookup asks DNS only: Windows'
+  getnameinfo went on, once DNS had no name, to LLMNR and NetBIOS over
+  TCP/IP, and gave up on an address nobody names after about 5s. ns
+  sends its own NetBIOS and mDNS queries first, so those fallbacks only
+  asked the same hosts again; Linux and macOS have none of them. And on
+  every OS, a host's NetBIOS and mDNS queries go out together and share
+  one 200 ms wait, which ends as soon as each has its answer or was
+  refused (an ICMP port unreachable, now heard on Linux and macOS too):
+  one after the other, each with its own wait, they took up to 400 ms.
+  Windows 11, wired, a /24 with 10 hosts, ReleaseFast, interleaved in
+  one random order, 12 runs each, medians (p90): `ns -s --hostname`
+  5.95s (6.14s) -> 0.81s (0.98s), DNS-only alone 1.00s (1.79s); the
+  same 5 names in every run of all three. `ns -s` unchanged, 0.565s.
+  Not measured on Linux or macOS, where only the shared wait applies.
+
 - On macOS, scans spread their connects over at most 3 threads, not
   up to half the cores. A connect to a closed port on the machine
   itself is refused inside the connect call, under the kernel's TCP

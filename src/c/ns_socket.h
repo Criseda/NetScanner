@@ -83,34 +83,46 @@ static inline int ns_inet_pton(const char *text, struct in_addr *out) {
 #endif
 }
 
-// Wait up to timeout_ms for `sock` to turn readable: 1 if it did, 0 on
-// timeout, -1 on error.
+// Most sockets one ns_wait_any call watches.
+#define NS_WAIT_MAX 8
+
+// Wait up to timeout_ms for any of `socks` (at most NS_WAIT_MAX) to
+// turn readable, setting ready[i] to 1 for each that did and 0 for the
+// rest: how many did, 0 on timeout, -1 on error. A socket with an error
+// pending (a connected UDP socket that got an ICMP port unreachable,
+// say) counts as readable: the next recv reports the error.
 //
 // On POSIX, a signal handler running on this thread makes poll() fail
 // with EINTR, and poll is never restarted, even under SA_RESTART. ns
 // runs two while its status line is up (Ctrl+C, and the SIGWINCH
 // redraw on a terminal resize), so retry with whatever time is left
 // instead of dropping an answer that is still on its way.
-static inline int ns_wait_readable(ns_socket sock, int timeout_ms) {
+static inline int ns_wait_any(const ns_socket *socks, int count, int timeout_ms,
+                              int *ready) {
+  if (count <= 0 || count > NS_WAIT_MAX) return -1;
 #ifdef _WIN32
   fd_set rfds;
   FD_ZERO(&rfds);
-  FD_SET(sock, &rfds);
+  for (int i = 0; i < count; i++) FD_SET(socks[i], &rfds);
   struct timeval tv = {
       .tv_sec = timeout_ms / 1000,
       .tv_usec = (timeout_ms % 1000) * 1000,
   };
-  int ready = select(0, &rfds, NULL, NULL, &tv);
-  return ready > 0 ? 1 : ready;
+  int n = select(0, &rfds, NULL, NULL, &tv);
+  for (int i = 0; i < count; i++) ready[i] = n > 0 && FD_ISSET(socks[i], &rfds);
+  return n;
 #else
   struct timespec start;
   clock_gettime(CLOCK_MONOTONIC, &start);
-  struct pollfd pfd = {.fd = sock, .events = POLLIN, .revents = 0};
+  struct pollfd pfds[NS_WAIT_MAX];
+  for (int i = 0; i < count; i++) {
+    pfds[i] = (struct pollfd){.fd = socks[i], .events = POLLIN, .revents = 0};
+  }
   int left = timeout_ms;
   for (;;) {
-    int ready = poll(&pfd, 1, left);
-    if (ready > 0) return 1;
-    if (ready == 0) return 0;
+    int n = poll(pfds, (nfds_t)count, left);
+    for (int i = 0; i < count; i++) ready[i] = n > 0 && pfds[i].revents != 0;
+    if (n >= 0) return n;
     if (errno != EINTR) return -1;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -119,6 +131,35 @@ static inline int ns_wait_readable(ns_socket sock, int timeout_ms) {
     left = timeout_ms - (int)elapsed_ms;
     if (left <= 0) return 0;
   }
+#endif
+}
+
+// Wait up to timeout_ms for `sock` to turn readable: 1 if it did, 0 on
+// timeout, -1 on error.
+static inline int ns_wait_readable(ns_socket sock, int timeout_ms) {
+  int ready;
+  int n = ns_wait_any(&sock, 1, timeout_ms, &ready);
+  return n > 0 ? 1 : n;
+}
+
+// A monotonic clock in milliseconds, for deadlines.
+static inline long long ns_now_ms(void) {
+#ifdef _WIN32
+  return (long long)GetTickCount64();
+#else
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (long long)now.tv_sec * 1000LL + now.tv_nsec / 1000000L;
+#endif
+}
+
+// Whether the last failed recv on a non-blocking socket just found
+// nothing there yet, rather than an error.
+static inline int ns_would_block(void) {
+#ifdef _WIN32
+  return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+  return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
 #endif
 }
 
