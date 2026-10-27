@@ -135,9 +135,19 @@ pub const POOL_PACE: usize = if (builtin.os.tag == .macos) 128 else 256;
 /// silent targets they change nothing: those wait on the network.
 const MAX_LOOPS = 8;
 
+/// MAX_LOOPS on macOS. There a connect to a closed port on the machine
+/// itself is refused inside the connect call, under the kernel's TCP
+/// locks, so loopback work does not spread over threads: past three,
+/// they mostly wait on each other. On an 11-core Mac, 5 loops took
+/// twice the kernel CPU of 3 and were 40% slower on `ns -p 127.0.0.1
+/// 1-65535`; 2 were slower again. Scans that wait on the network, a
+/// LAN host's full range included, took the same time with 3 as 5.
+const MAX_LOOPS_MACOS = 3;
+
 fn loopCount() usize {
     const cpus = std.Thread.getCpuCount() catch 1;
-    return std.math.clamp(cpus / 2, 1, MAX_LOOPS);
+    const most: usize = if (builtin.os.tag == .macos) MAX_LOOPS_MACOS else MAX_LOOPS;
+    return std.math.clamp(cpus / 2, 1, most);
 }
 
 /// Most connects a loop starts before it checks on the ones in flight.

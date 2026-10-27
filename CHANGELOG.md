@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- On macOS, scans spread their connects over at most 3 threads, not
+  up to half the cores. A connect to a closed port on the machine
+  itself is refused inside the connect call, under the kernel's TCP
+  locks, so more threads only waited on each other. On an 11-core Mac
+  (5 threads before), ReleaseFast, thread counts interleaved in one
+  random order, medians (p90): `ns -p 127.0.0.1 1-65535` (30 runs
+  each) 0.594s (0.847s) -> 0.427s (0.543s), with kernel CPU 2.56s ->
+  1.15s; the router's full range (6 each) 45.0s -> 43.9s, the same
+  five ports every run; router 1-1024 and `ns -s` on a /23 unchanged.
+  Linux and Windows are not measured yet and keep their thread count.
+
 - The per-host mDNS name lookup (`--hostname`) reads the reply with the
   same parser as the multicast listener, and the C one is gone (#91). A
   PTR answer now counts only when it is about the address asked; one
