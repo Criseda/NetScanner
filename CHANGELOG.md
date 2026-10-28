@@ -53,24 +53,23 @@
   probe per address and no retry, so no observed signal says an
   address that has not answered yet never will.
 
-- A scan's threads take their ports and report their verdicts a batch
-  at a time, one lock per batch instead of two per port (#105). Round
-  trips are still measured when each answer arrives, so the learned
-  wait and the window see the same times. ReleaseFast, interleaved,
-  medians (p90): Linux (WSL2) `ns -p 127.0.0.1 1-65535` (20 each)
-  0.099s (0.109s) -> 0.077s (0.091s); Docker lab clean target 1-65535
-  (12 each) 0.167s (0.184s) -> 0.152s (0.166s), lossy and first-syn-lost
-  within noise. Windows 11 loopback 1-65535 (12 each), the router's
-  full range (10 each) and scanme.nmap.org 1-1024 (16 each) unchanged:
-  there the connects' system calls or the network set the pace. On
-  macOS a loop takes one port at a time and only reports in batches:
-  there loops that each fired a batch of connects back to back ran
-  into each other under the kernel's TCP locks, and `ns -p 127.0.0.1
-  1-65535` on an M3 Pro took about a fifth longer than before (four of
-  six sets of 30-60 runs, p < 0.01 in three). Taking one at a time it
-  takes as long as before, 0.644s (0.850s) -> 0.647s (0.807s), 60 runs
-  each; on Linux (arm64 VM, same Mac) taking one gave back half the
-  gain, so the batch stays there. Same ports found everywhere.
+- A scan's threads report their verdicts a batch at a time, one lock
+  per batch instead of one per port (#105). Round trips are still
+  measured when each answer arrives, so the learned wait and the
+  window see the same times. They still take their ports one at a
+  time: taking a batch and firing it back to back was faster on Linux
+  but made macOS loopback scans about a fifth slower (four of six sets
+  of 30-60 runs, p < 0.01 in three), where a connect to a closed local
+  port is refused under the kernel's TCP locks and the loops ran into
+  each other there. ReleaseFast, interleaved, medians (p90), `ns -p
+  127.0.0.1 1-65535`: Linux (arm64 VM on an M3 Pro Mac, 30 each)
+  0.086s (0.091s) -> 0.073s (0.079s), against 0.065s taking batches;
+  macOS 27 (M3 Pro, 40 each) 0.585s (0.818s) -> 0.567s (0.774s),
+  within noise; the router 1-1024 (14 each) and scanme.nmap.org 1-1024
+  (30 each) unchanged. Same ports found everywhere. Not measured in this form on Windows,
+  native Linux or the Docker lab; with batched takes, Windows loopback,
+  router and scanme were unchanged, and WSL2 loopback went 0.099s ->
+  0.077s.
 
 - On macOS, scans spread their connects over at most 3 threads, not
   up to half the cores. A connect to a closed port on the machine

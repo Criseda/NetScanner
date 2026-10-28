@@ -180,18 +180,6 @@ fn loopCount() usize {
 /// two.
 const START_BATCH = 16;
 
-/// Most connects a loop takes from the source under one lock (see
-/// Shared), and starts before it takes more. On macOS one: there a
-/// connect to a closed port on the machine itself is refused inside the
-/// connect call, under the kernel's TCP locks (see MAX_LOOPS_MACOS),
-/// and loops that each took a batch and fired it back to back ran into
-/// each other there. `ns -p 127.0.0.1 1-65535` on an M3 Pro (30 runs
-/// each, medians): 0.73s taking a batch, 0.57s taking one, 0.64s with a
-/// lock per take and per verdict; the kernel CPU rose by a quarter with
-/// the batch. Elsewhere the batch is what pays: on Linux (arm64 VM, same
-/// machine) the same scan took 0.071s taking a batch, 0.081s taking one.
-const TAKE_BATCH = if (builtin.os.tag == .macos) 1 else START_BATCH;
-
 /// How a run decides how many connects to keep in flight.
 pub const Pace = enum {
     /// Steered by the target's answers (see Window): for many connects
@@ -332,10 +320,16 @@ const Cut = struct {
 };
 
 /// A run's `source` and Window, shared by its loops: one call at a time.
-/// A loop takes its connects (up to TAKE_BATCH) and reports their
-/// verdicts a batch at a time, one lock for each batch: a lock per
-/// connect cost two round-trips between threads for every port, 130k on
-/// a full range.
+/// A loop reports its verdicts a batch at a time, one lock for each
+/// batch, rather than one per verdict: on a full range that was 65k
+/// round-trips between threads. It still takes its connects one at a
+/// time, starting each before it takes the next. Taking a batch and
+/// firing it back to back was faster on Linux (arm64 VM, `ns -p
+/// 127.0.0.1 1-65535` 0.070s against 0.081s) but slower on macOS (M3
+/// Pro, 0.73s against 0.57s, its kernel CPU up by a quarter): there a
+/// connect to a closed local port is refused inside the connect call,
+/// under the kernel's TCP locks (see MAX_LOOPS_MACOS), and loops firing
+/// batches ran into each other.
 fn Shared(comptime Job: type, comptime Source: type) type {
     return struct {
         source: Source,
@@ -352,24 +346,20 @@ fn Shared(comptime Job: type, comptime Source: type) type {
 
         const NO_CAP = 0;
 
-        const Taken = struct {
-            count: usize,
+        const Take = union(enum) {
+            job: Job,
+            /// This loop holds its share of the window already.
+            full,
             /// The source has no more.
-            dry: bool,
+            dry,
         };
 
-        /// The next connects, into `out`, for a loop that has
-        /// `in_flight` going: as many as its share of the window has
-        /// room for, `out.len` at most.
-        fn take(self: *@This(), in_flight: usize, out: []Job) Taken {
+        /// The next connect for a loop that has `in_flight` going.
+        fn take(self: *@This(), in_flight: usize) Take {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            const share = @max(1, self.window.size / self.loops);
-            const room = @min(out.len, share -| in_flight);
-            for (out[0..room], 0..) |*job, i| {
-                job.* = self.source.next() orelse return .{ .count = i, .dry = true };
-            }
-            return .{ .count = room, .dry = false };
+            if (in_flight >= @max(1, self.window.size / self.loops)) return .full;
+            return if (self.source.next()) |job| .{ .job = job } else .dry;
         }
 
         /// Report verdicts that all came in by `now_ns`: their round
@@ -412,39 +402,38 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
     defer flight.deinit(allocator);
     // Verdicts waiting to be reported together: at most what is in
     // flight, or a batch that settled as it started.
-    const settled = try allocator.alloc(Settled(Job), capacity);
+    const settled = try allocator.alloc(Settled(Job), @max(capacity, START_BATCH));
     defer allocator.free(settled);
 
     var dry = false;
     while (true) {
         // Top up, a batch at a time, while the window has room.
         var room_left = false;
-        if (!dry and flight.len < flight.jobs.len) {
-            var batch: [START_BATCH]Job = undefined;
-            const most = @min(START_BATCH, flight.jobs.len - flight.len);
-            var taken_total: usize = 0;
-            var count: usize = 0;
-            while (!dry and taken_total < most) {
-                const want = @min(TAKE_BATCH, most - taken_total);
-                const taken = shared.take(flight.len, batch[taken_total..][0..want]);
-                dry = taken.dry;
-                for (batch[taken_total..][0..taken.count]) |job| {
-                    const started = nowNs(io);
-                    switch (start(job.target)) {
-                        .done => |outcome| {
-                            settled[count] = .{ .job = job, .outcome = outcome, .elapsed_us = elapsedUs(started, nowNs(io)) };
-                            count += 1;
-                        },
-                        .pending => |sock| flight.add(job, sock, started),
-                    }
-                }
-                taken_total += taken.count;
-                // Short of what it asked for: its share of the window is full.
-                if (taken.count < want) break;
+        var batch: usize = 0;
+        var count: usize = 0;
+        while (!dry and flight.len < flight.jobs.len) : (batch += 1) {
+            if (batch == START_BATCH) {
+                room_left = true;
+                break;
             }
-            room_left = !dry and taken_total == START_BATCH;
-            shared.done(settled[0..count], nowNs(io));
+            const job: Job = switch (shared.take(flight.len)) {
+                .job => |job| job,
+                .full => break,
+                .dry => {
+                    dry = true;
+                    break;
+                },
+            };
+            const started = nowNs(io);
+            switch (start(job.target)) {
+                .done => |outcome| {
+                    settled[count] = .{ .job = job, .outcome = outcome, .elapsed_us = elapsedUs(started, nowNs(io)) };
+                    count += 1;
+                },
+                .pending => |sock| flight.add(job, sock, started),
+            }
         }
+        shared.done(settled[0..count], nowNs(io));
         if (flight.len == 0) {
             if (dry) return;
             continue;
@@ -460,7 +449,7 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
         // backwards keeps swap-removal from skipping a slot.
         const after = nowNs(io);
         const cut = shared.cut();
-        var count: usize = 0;
+        count = 0;
         var i = flight.len;
         while (i > 0) {
             i -= 1;
