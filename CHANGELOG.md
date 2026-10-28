@@ -16,7 +16,11 @@
   one random order, 12 runs each, medians (p90): `ns -s --hostname`
   5.95s (6.14s) -> 0.81s (0.98s), DNS-only alone 1.00s (1.79s); the
   same 5 names in every run of all three. `ns -s` unchanged, 0.565s.
-  Not measured on Linux or macOS, where only the shared wait applies.
+  macOS 27 (M3 Pro, Wi-Fi, a /23 with 30-48 hosts, 14 runs each),
+  where only the shared wait applies: 1.74s (1.76s) -> 0.93s (1.01s),
+  the same 8 names, each found about as often as its host was; a
+  single host that answers neither query 0.42s -> 0.22s. Not measured
+  on Linux.
 
 - `ns -p` no longer holds its opening burst for the full 500 ms on a
   host that drops some of it (#106). The probes sent before the host's
@@ -40,7 +44,12 @@
     0.714s (0.725s), its rate-limited port 53 in 3 of 12 runs against
     0 of 12; a Raspberry Pi 1-1024 (20 each), scanme.nmap.org 1-1024
     (14 each) and loopback 1-65535 (10 each) unchanged.
-  Not measured on macOS. Sweeps (`ns -s`) keep their fixed 500 ms: one
+  - macOS 27, M3 Pro, Wi-Fi: a smart-home device that drops closed
+    ports, 1-1024 (12 each) 1.40s (2.03s) -> 1.01s (2.03s); the router
+    (which refuses closed ports), three other LAN devices (12-30 each),
+    scanme.nmap.org 1-1024 (30 each, three times over) and 1-8192 (8
+    each, kernel CPU 2.51s -> 2.45s) unchanged.
+  Sweeps (`ns -s`) keep their fixed 500 ms: one
   probe per address and no retry, so no observed signal says an
   address that has not answered yet never will.
 
@@ -53,8 +62,15 @@
   (12 each) 0.167s (0.184s) -> 0.152s (0.166s), lossy and first-syn-lost
   within noise. Windows 11 loopback 1-65535 (12 each), the router's
   full range (10 each) and scanme.nmap.org 1-1024 (16 each) unchanged:
-  there the connects' system calls or the network set the pace. Same
-  ports found everywhere. Not measured on macOS.
+  there the connects' system calls or the network set the pace. On
+  macOS a loop takes one port at a time and only reports in batches:
+  there loops that each fired a batch of connects back to back ran
+  into each other under the kernel's TCP locks, and `ns -p 127.0.0.1
+  1-65535` on an M3 Pro took about a fifth longer than before (four of
+  six sets of 30-60 runs, p < 0.01 in three). Taking one at a time it
+  takes as long as before, 0.644s (0.850s) -> 0.647s (0.807s), 60 runs
+  each; on Linux (arm64 VM, same Mac) taking one gave back half the
+  gain, so the batch stays there. Same ports found everywhere.
 
 - On macOS, scans spread their connects over at most 3 threads, not
   up to half the cores. A connect to a closed port on the machine
