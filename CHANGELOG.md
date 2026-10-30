@@ -2,6 +2,86 @@
 
 ## Unreleased
 
+- `--hostname` takes a fraction of the time it did, most of all on
+  Windows (#107). There the reverse DNS lookup asks DNS only: Windows'
+  getnameinfo went on, once DNS had no name, to LLMNR and NetBIOS over
+  TCP/IP, and gave up on an address nobody names after about 5s. ns
+  sends its own NetBIOS and mDNS queries first, so those fallbacks only
+  asked the same hosts again; Linux and macOS have none of them. And on
+  every OS, a host's NetBIOS and mDNS queries go out together and share
+  one 200 ms wait, which ends as soon as each has its answer or was
+  refused (an ICMP port unreachable, now heard on Linux and macOS too):
+  one after the other, each with its own wait, they took up to 400 ms.
+  Windows 11, wired, a /24 with 10 hosts, ReleaseFast, interleaved in
+  one random order, 12 runs each, medians (p90): `ns -s --hostname`
+  5.95s (6.14s) -> 0.81s (0.98s), DNS-only alone 1.00s (1.79s); the
+  same 5 names in every run of all three. `ns -s` unchanged, 0.565s.
+  Re-run against current main (12 each): 5.93s (6.76s) -> 0.77s
+  (0.84s), the same 4 names in every run of both.
+  macOS 27 (M3 Pro, Wi-Fi, a /23 with 30-48 hosts, 14 runs each),
+  where only the shared wait applies: 1.74s (1.76s) -> 0.93s (1.01s),
+  the same 8 names, each found about as often as its host was; a
+  single host that answers neither query 0.42s -> 0.22s. Not measured
+  on Linux.
+
+- `ns -p` no longer holds its opening burst for the full 500 ms on a
+  host that drops some of it (#106). The probes sent before the host's
+  first answer had no learned wait, so each unanswered one waited 500
+  ms, and since they fill the window, the scan waited with them: a
+  router that drops closed ports took 0.9s for 1-1024, and a scan
+  whose first SYN to port 22 was lost took 0.5s however few ports it
+  covered. They already get a second try once the host turns out near,
+  so now they wait the learned wait too, and until the burst has had
+  no answer for that long: its answers queue, and on a host 80 ms away
+  they came in over 100-126 ms, past the 121 ms learned from them. A
+  far host (no answer under 100 ms) is unchanged.
+  ReleaseFast, old and new interleaved in one random order, medians
+  (p90), every open port found in every run unless noted:
+  - Docker lab (Linux, arm64 under OrbStack on an M3 Pro), 1-1024 (20
+    each): first SYN to 22 lost 0.511s (0.516s) -> 0.114s (0.116s);
+    closed ports dropped 0.840s (0.847s) -> 0.655s (0.665s); 5% of
+    SYNs lost 0.619s (0.627s) -> 0.220s (0.227s), where one lost SYN
+    in the burst held the scan; 80 ms away 0.272s (0.278s) -> 0.271s
+    (0.281s) and clean unchanged. 1-65535 (12 each): first SYN lost
+    0.514s (0.518s) -> 0.146s (0.174s); 5% loss 0.743s (0.747s) ->
+    0.660s (0.668s); clean unchanged.
+  - Windows 11, wired: home router 1-1024 (16 each) 0.876s (0.885s) ->
+    0.712s (0.739s), its rate-limited port 53 in 4 of 16 runs against
+    2 of 16; the router 1-65535 (12 each) 14.51s (14.71s) -> 14.48s
+    (14.52s), port 53 in 2 of 12 against 0 of 12; scanme.nmap.org
+    1-1024 (14 each) and loopback 1-65535 (16 each) unchanged. A
+    Raspberry Pi 1-1024 (20 each) was unchanged in an earlier run,
+    when threads still took their ports a batch at a time.
+  - macOS 27, M3 Pro, Wi-Fi: a smart-home device that drops closed
+    ports, 1-1024 (12 each) 1.40s (2.03s) -> 1.01s (2.03s); the router
+    (which refuses closed ports), three other LAN devices (12-30 each),
+    scanme.nmap.org 1-1024 (30 each, three times over) and 1-8192 (8
+    each, kernel CPU 2.51s -> 2.45s) unchanged.
+  Sweeps (`ns -s`) keep their fixed 500 ms: one
+  probe per address and no retry, so no observed signal says an
+  address that has not answered yet never will.
+
+- A scan's threads report their verdicts a batch at a time, one lock
+  per batch instead of one per port (#105). Round trips are still
+  measured when each answer arrives, so the learned wait and the
+  window see the same times. They still take their ports one at a
+  time: taking a batch and firing it back to back was faster on Linux
+  but made macOS loopback scans about a fifth slower (four of six sets
+  of 30-60 runs, p < 0.01 in three), where a connect to a closed local
+  port is refused under the kernel's TCP locks and the loops ran into
+  each other there. ReleaseFast, interleaved, medians (p90), `ns -p
+  127.0.0.1 1-65535`: Linux (arm64 VM on an M3 Pro Mac, 30 each)
+  0.086s (0.091s) -> 0.073s (0.079s), against 0.065s taking batches;
+  macOS 27 (M3 Pro, 40 each) 0.585s (0.818s) -> 0.567s (0.774s),
+  within noise, and its router 1-1024 (14 each) and scanme.nmap.org
+  1-1024 (30 each) unchanged; the Docker lab's clean target, 1-1024
+  (20 each) and 1-65535 (12 each), unchanged; Windows 11 (16 each)
+  2.63s (2.90s) -> 2.66s (2.89s), within noise, as were its router
+  1-65535 (12 each) and scanme.nmap.org 1-1024 (14 each); WSL2 on the
+  same machine (30 each) 0.106s (0.122s) -> 0.098s (0.108s). Same
+  ports found everywhere, the router's rate-limited port 53 aside (see
+  above). Not measured on native Linux.
+
 - A connect that the machine cannot start (no socket to be had, or no
   local port to send from) no longer counts as an unanswered port. It
   waits and is tried again, while the connects in flight settle; a scan

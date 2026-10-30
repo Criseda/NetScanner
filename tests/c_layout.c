@@ -12,6 +12,8 @@
 #include "icmp_ping.h"
 #include "multicast.h"
 #include "neighbors.h"
+#include "ns_socket.h"
+#include "resolver.h"
 #include "tcp_probe.h"
 
 const size_t layout_ns_neighbor_size = sizeof(ns_neighbor);
@@ -39,6 +41,16 @@ const int layout_tcp_probe_unconfirmed = TCP_PROBE_UNCONFIRMED;
 const int layout_tcp_probe_no_socket = TCP_PROBE_NO_SOCKET;
 const int layout_tcp_probe_no_address = TCP_PROBE_NO_ADDRESS;
 const int layout_tcp_probe_max_sockets = TCP_PROBE_MAX_SOCKETS;
+
+const size_t layout_udp_exchange_size = sizeof(ns_udp_exchange);
+const size_t layout_udp_exchange_align = _Alignof(ns_udp_exchange);
+const size_t layout_udp_exchange_req = offsetof(ns_udp_exchange, req);
+const size_t layout_udp_exchange_req_len = offsetof(ns_udp_exchange, req_len);
+const size_t layout_udp_exchange_resp = offsetof(ns_udp_exchange, resp);
+const size_t layout_udp_exchange_cap = offsetof(ns_udp_exchange, cap);
+const size_t layout_udp_exchange_resp_len = offsetof(ns_udp_exchange, resp_len);
+const size_t layout_udp_exchange_port = offsetof(ns_udp_exchange, port);
+const int layout_ns_wait_max = NS_WAIT_MAX;
 
 const size_t layout_mc_socket_size = sizeof(mc_socket);
 const int64_t layout_mc_no_socket = MC_NO_SOCKET;

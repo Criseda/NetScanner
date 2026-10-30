@@ -107,8 +107,11 @@ finds with each TCP port open (`scripts/port_counts.json`).
 Each connect attempt waits as long as the host's own answers suggest:
 `ns` times the ports that answer and waits a little longer than that
 (TCP's retransmission formula, between 100 and 500 ms), so a host that
-silently drops closed ports costs a fraction of a fixed wait. Until the
-first answer, and for a host that never answers, the wait is 500 ms.
+silently drops closed ports costs a fraction of a fixed wait. The
+attempts sent before the first answer start out with 500 ms, and are
+cut to the learned wait once the host has answered, and the rest of
+that opening burst has gone quiet for that long; for a host that
+never answers, the wait is 500 ms.
 The learned wait is used only when two tries of it fit in 500 ms and
 the host has answered at least once within 100 ms, and an unanswered
 port gets the second try near the end of the scan, so neither one lost

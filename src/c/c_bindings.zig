@@ -4,8 +4,7 @@ pub const c = struct {
     pub extern "c" fn tcp_probe_wait(socks: [*]const usize, count: c_int, wait_ms: c_int, settled: [*]u8) c_int;
     pub extern "c" fn tcp_probe_finish(sock: usize, settled: c_int) c_int;
     pub extern "c" fn resolve_ptr(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize) c_int;
-    pub extern "c" fn query_netbios(ip_address: [*:0]const u8, out_buf: [*]u8, out_len: usize, timeout_ms: c_int) c_int;
-    pub extern "c" fn udp_exchange(ip: *const [4]u8, port: c_ushort, req: [*]const u8, req_len: usize, resp: [*]u8, cap: usize, timeout_ms: c_int) c_int;
+    pub extern "c" fn udp_exchange_all(ip: *const [4]u8, xs: [*]UdpExchange, count: c_int, timeout_ms: c_int) void;
     pub extern "c" fn read_file_content(path: [*:0]const u8, out_len: *usize) ?[*]u8;
     pub extern "c" fn free_file_content(ptr: [*]u8) void;
     pub extern "c" fn get_mac_sendarp(ip_address: [*:0]const u8, out_mac: [*]u8) c_int;
@@ -94,20 +93,36 @@ pub fn resolvePtr(ip_null_terminated: [*:0]const u8, buf: []u8) ?[]const u8 {
     return null;
 }
 
-pub fn queryNetbios(ip_null_terminated: [*:0]const u8, buf: []u8, timeout_ms: c_int) ?[]const u8 {
-    if (c.query_netbios(ip_null_terminated, buf.ptr, buf.len, timeout_ms) == 0) {
-        return std.mem.sliceTo(buf, 0);
-    }
-    return null;
-}
+/// `ns_udp_exchange` from resolver.h: one request of udpExchangeAll.
+pub const UdpExchange = extern struct {
+    req: [*]const u8,
+    req_len: usize,
+    resp: [*]u8,
+    cap: usize,
+    resp_len: c_int = -1,
+    port: c_ushort,
 
-/// Send `request` to ip:port and wait up to timeout_ms for one reply
-/// from that address (see udp_exchange in resolver.h). The reply, in
-/// `buf`, or null on timeout or failure.
-pub fn udpExchange(ip: [4]u8, port: u16, request: []const u8, buf: []u8, timeout_ms: c_int) ?[]u8 {
-    const n = c.udp_exchange(&ip, port, request.ptr, request.len, buf.ptr, buf.len, timeout_ms);
-    if (n < 0) return null;
-    return buf[0..@intCast(n)];
+    pub fn init(port: u16, request: []const u8, buf: []u8) UdpExchange {
+        return .{ .req = request.ptr, .req_len = request.len, .resp = buf.ptr, .cap = buf.len, .port = port };
+    }
+
+    /// The reply, or null when none came.
+    pub fn reply(self: *const UdpExchange) ?[]u8 {
+        if (self.resp_len < 0) return null;
+        return self.resp[0..@intCast(self.resp_len)];
+    }
+};
+
+/// Most requests one udpExchangeAll call makes (NS_WAIT_MAX in
+/// src/c/ns_socket.h).
+pub const UDP_EXCHANGE_MAX = 8;
+
+/// Send every request in `xs` to its port on `ip` at once and wait up
+/// to timeout_ms for their replies, ending early once each has a reply
+/// or was refused (see udp_exchange_all in resolver.h).
+pub fn udpExchangeAll(ip: [4]u8, xs: []UdpExchange, timeout_ms: c_int) void {
+    std.debug.assert(xs.len <= UDP_EXCHANGE_MAX);
+    c.udp_exchange_all(&ip, xs.ptr, @intCast(xs.len), timeout_ms);
 }
 
 /// Most sockets one tcpProbeWait call watches (TCP_PROBE_MAX_SOCKETS
