@@ -103,6 +103,7 @@ const layout = struct {
     extern const layout_tcp_probe_refused: c_int;
     extern const layout_tcp_probe_filtered: c_int;
     extern const layout_tcp_probe_pending: c_int;
+    extern const layout_tcp_probe_unconfirmed: c_int;
     extern const layout_tcp_probe_max_sockets: c_int;
 
     extern const layout_mc_socket_size: usize;
@@ -137,6 +138,7 @@ test "TcpProbe and TCP_PROBE_MAX_SOCKETS match tcp_probe.h" {
     try std.testing.expectEqual(layout.layout_tcp_probe_refused, @backingInt(TcpProbe.refused));
     try std.testing.expectEqual(layout.layout_tcp_probe_filtered, @backingInt(TcpProbe.filtered));
     try std.testing.expectEqual(layout.layout_tcp_probe_pending, @backingInt(TcpProbe.pending));
+    try std.testing.expectEqual(layout.layout_tcp_probe_unconfirmed, @backingInt(TcpProbe.unconfirmed));
     try std.testing.expectEqual(layout.layout_tcp_probe_max_sockets, c_bindings.TCP_PROBE_MAX_SOCKETS);
 }
 

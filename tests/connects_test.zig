@@ -216,6 +216,89 @@ test "run never reports a loopback port open that nothing listens on" {
     for (outcomes) |o| try std.testing.expect(o.? != .open);
 }
 
+test "a crossed pair of loopback connects is not reported open" {
+    // Winsock sockets are not file descriptors; tcp_probe.c gets the
+    // same treatment, but is not driven from here.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+
+    // Sockets bound to ports A and B, each connecting to the other's
+    // port at once: their SYNs cross, and the OS completes both as one
+    // simultaneous open, with nothing listening on either port. A scan
+    // of the machine's own address makes such pairs by chance, when
+    // two of its connects get each other's target as source port. On
+    // macOS they form every time; where a SYN is answered before the
+    // second connect starts (Linux), both are refused, and the test
+    // has nothing to show.
+    var a: u16 = 47_300;
+    while (a < 47_380) : (a += 2) {
+        const b = a + 1;
+        const x = boundNonBlocking(a) orelse continue;
+        const y = boundNonBlocking(b) orelse {
+            _ = std.c.close(x);
+            continue;
+        };
+        const started_x = connectLoopback(x, b);
+        const started_y = connectLoopback(y, a);
+        if (started_x and started_y) {
+            for ([_]std.posix.fd_t{ x, y }) |fd| {
+                var pfd = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+                _ = std.c.poll(&pfd, 1, 1000);
+            }
+        }
+        if (!started_x or !started_y or !isConnected(x) or !isConnected(y)) {
+            _ = std.c.close(x);
+            _ = std.c.close(y);
+            // Refused, or a port still in TIME_WAIT from an earlier
+            // run's pair: try the next two.
+            continue;
+        }
+        const to_b = connects.settledVerdict(io, x, .{ .ip = .{ 127, 0, 0, 1 }, .port = b, .timeout_ms = 1000 });
+        const to_a = connects.settledVerdict(io, y, .{ .ip = .{ 127, 0, 0, 1 }, .port = a, .timeout_ms = 1000 });
+        try std.testing.expect(to_b != .open);
+        try std.testing.expect(to_a != .open);
+        return;
+    }
+    return error.SkipZigTest;
+}
+
+/// A non-blocking TCP socket bound to 127.0.0.1:port, or null when the
+/// port is taken.
+fn boundNonBlocking(port: u16) ?std.posix.fd_t {
+    const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    if (fd < 0) return null;
+    const raw_flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    var oflags: std.posix.O = @bitCast(@as(u32, @bitCast(raw_flags)));
+    oflags.NONBLOCK = true;
+    var addr = loopback(port);
+    if (raw_flags < 0 or std.c.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(oflags))) < 0 or
+        std.c.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0)
+    {
+        _ = std.c.close(fd);
+        return null;
+    }
+    return fd;
+}
+
+/// Start a connect to 127.0.0.1:port. False if it failed at once.
+fn connectLoopback(fd: std.posix.fd_t, port: u16) bool {
+    var addr = loopback(port);
+    const rc = std.c.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
+    return rc == 0 or std.c.errno(rc) == .INPROGRESS;
+}
+
+/// Whether a connect has completed. Reading SO_ERROR would clear the
+/// error the verdict is made of, so this asks for the peer instead.
+fn isConnected(fd: std.posix.fd_t) bool {
+    var peer: std.posix.sockaddr.in = undefined;
+    var len: std.posix.socklen_t = @sizeOf(@TypeOf(peer));
+    return std.c.getpeername(fd, @ptrCast(&peer), &len) == 0;
+}
+
+fn loopback(port: u16) std.posix.sockaddr.in {
+    return .{ .port = std.mem.nativeToBig(u16, port), .addr = @bitCast([4]u8{ 127, 0, 0, 1 }) };
+}
+
 test "run with nothing to do returns at once" {
     var outcomes: [0]?connects.Outcome = .{};
     var recorder: Recorder = .{ .ports = &.{}, .outcomes = &outcomes };

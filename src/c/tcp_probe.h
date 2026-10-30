@@ -3,13 +3,16 @@
 
 #include <stdint.h>
 
-// Result of one TCP connect attempt, mirroring Outcome in
+// Result of one TCP connect attempt, mirroring Verdict in
 // src/core/connects.zig, plus "not settled yet".
 typedef enum {
   TCP_PROBE_OPEN, // Connected: the port is open.
   TCP_PROBE_REFUSED, // RST: the port is closed, but a host answered.
   TCP_PROBE_FILTERED, // Timeout or unreachable: no answer at all.
   TCP_PROBE_PENDING, // Started; wait on the socket, then finish it.
+  // Connected to one of the machine's own addresses: maybe a listener,
+  // maybe another connect going the other way. Connect again, alone.
+  TCP_PROBE_UNCONFIRMED,
 } tcp_probe_result;
 
 // Most sockets one tcp_probe_wait call watches. MAX_IN_FLIGHT in
