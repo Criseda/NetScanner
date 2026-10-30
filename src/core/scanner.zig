@@ -720,8 +720,11 @@ fn sweepHosts(shares: Discovery, ips: []const [4]u8) void {
         }
     };
     var sweep: Sweep = .{ .discovery = shares, .ips = ips };
-    connects.run(HostProbe, shares.run.allocator, shares.run.io, &sweep, .fixed) catch |err| {
-        std.debug.print("tcp sweep skipped: {}\n", .{err});
+    connects.run(HostProbe, shares.run.allocator, shares.run.io, &sweep, .fixed) catch |err| switch (err) {
+        // Partway through: the hosts not yet probed are missing, and
+        // the other probes' answers still count.
+        error.OutOfSockets => std.debug.print("tcp sweep stopped: out of sockets; hosts it did not reach may be missing\n", .{}),
+        else => std.debug.print("tcp sweep skipped: {}\n", .{err}),
     };
 }
 

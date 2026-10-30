@@ -26,6 +26,28 @@ pub const Outcome = enum {
     filtered, // Timeout or unreachable: no answer at all.
 };
 
+/// What a connect found, before a run reports it: an Outcome, or a
+/// connect to one of the machine's own addresses that succeeded and is
+/// not yet known to have met a listener (see connected).
+const Verdict = enum {
+    open,
+    refused,
+    filtered,
+    unconfirmed,
+
+    /// The Outcome of a connect that was the only one in flight. A
+    /// connect to the machine's own address can then only have met a
+    /// listener: there was no other connect for it to meet, and one
+    /// that met itself is refused already.
+    fn alone(self: Verdict) Outcome {
+        return switch (self) {
+            .open, .unconfirmed => .open,
+            .refused => .refused,
+            .filtered => .filtered,
+        };
+    }
+};
+
 /// One connect to make: where to, and how long to wait for an answer.
 pub const Target = struct {
     ip: [4]u8,
@@ -54,7 +76,7 @@ comptime {
 
 const is_windows = builtin.os.tag == .windows;
 /// A connect in flight: a Winsock SOCKET, or a file descriptor.
-const Socket = if (is_windows) usize else std.posix.fd_t;
+pub const Socket = if (is_windows) usize else std.posix.fd_t;
 /// poll()'s per-socket record; Windows waits through select() instead.
 const PollFd = if (is_windows) void else std.posix.pollfd;
 
@@ -101,30 +123,71 @@ pub fn inFlightLimit() usize {
 ///
 /// The connects are shared out over up to MAX_LOOPS threads (see
 /// there), but calls into `source` are serialized, one at a time, so
-/// it needs no locks of its own. Fails only when nothing at all could
-/// be set up; nothing has been probed then.
+/// it needs no locks of its own.
+///
+/// A connect to one of the machine's own addresses that succeeds may
+/// have met another of the run's connects rather than a listener (see
+/// connected). Such a port is reported last: once every other connect
+/// has settled, it gets one more, alone, and that one's verdict counts.
+///
+/// A connect this machine cannot start (no socket, no local port to
+/// send from) waits and is tried again (see Held): it is never reported
+/// as unanswered, since it never asked the target anything. Fails when
+/// nothing at all could be set up, or with error.OutOfSockets when a
+/// connect could not start for STALL_LIMIT_NS; `done` is then never
+/// called for the connects that did not start, nor for those still to
+/// be confirmed.
 pub fn run(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, source: anytype, pace: Pace) !void {
     const limit = inFlightLimit();
     const loops = @min(loopCount(), limit);
     var shared: Shared(Job, @TypeOf(source)) = .{
         .source = source,
         .io = io,
+        .allocator = allocator,
         .loops = loops,
         // Every loop holds at least one connect.
         .window = .init(@max(loops, @min(POOL_PACE, limit)), limit, pace),
     };
+    defer shared.unconfirmed.deinit(allocator);
     // Each loop can hold an even share of the largest window.
     const capacity = std.math.divCeil(usize, limit, loops) catch unreachable;
 
-    var threads: [MAX_LOOPS]?std.Thread = @splat(null);
-    defer for (threads) |t| if (t) |thread| thread.join();
-    for (threads[1..loops]) |*t| {
-        // A loop that cannot start costs only its share of the window:
-        // the others still drain the source.
-        t.* = std.Thread.spawn(.{}, loopDetached, .{ Job, allocator, io, &shared, capacity }) catch null;
+    {
+        var threads: [MAX_LOOPS]?std.Thread = @splat(null);
+        defer for (threads) |t| if (t) |thread| thread.join();
+        for (threads[1..loops]) |*t| {
+            // A loop that cannot start costs only its share of the
+            // window: the others still drain the source.
+            t.* = std.Thread.spawn(.{}, loopDetached, .{ Job, allocator, io, &shared, capacity }) catch null;
+        }
+        try loop(Job, allocator, io, &shared, capacity);
     }
-    try loop(Job, allocator, io, &shared, capacity);
+    if (shared.starved.load(.monotonic)) return error.OutOfSockets;
+
+    // Every loop has finished, so these connects are the only ones in
+    // flight, one at a time. On loopback each takes well under a
+    // millisecond, and only a scan of the machine itself has any.
+    for (shared.unconfirmed.items) |job| {
+        const started = nowNs(io);
+        const outcome = connectOnce(io, job.target);
+        source.done(job, outcome, elapsedUs(started, nowNs(io)));
+    }
 }
+
+/// How long a loop goes on retrying a connect it cannot start (see
+/// Held) before it gives up on the run. macOS frees a closed socket
+/// only in a sweep that runs about every 2 s: back-to-back full
+/// loopback scans leave so many waiting that socket() fails with
+/// ENOBUFS until the next sweep (seen on an M3 Pro; no sysctl raises
+/// the limit). This outlasts two sweeps.
+pub const STALL_LIMIT_NS = 5 * std.time.ns_per_s;
+/// The pause before a connect that could not start is tried again. It
+/// doubles while the shortage lasts, up to MAX_PAUSE_NS: a descriptor
+/// freed by a connect settling is taken up within a millisecond, and a
+/// sweep within a tenth of a second, while a long wait costs a few
+/// dozen system calls.
+const FIRST_PAUSE_NS = 1 * std.time.ns_per_ms;
+const MAX_PAUSE_NS = 100 * std.time.ns_per_ms;
 
 /// How many connects the old thread pool kept in flight against one
 /// host (one blocking connect per thread): the pace every host already
@@ -302,7 +365,7 @@ pub const Window = struct {
 
 /// One connect's verdict, on its way back to the source.
 fn Settled(comptime Job: type) type {
-    return struct { job: Job, outcome: Outcome, elapsed_us: u64 };
+    return struct { job: Job, verdict: Verdict, elapsed_us: u64 };
 }
 
 /// How soon a connect with a `cut_floor_ms` may give up: once the
@@ -334,6 +397,7 @@ fn Shared(comptime Job: type, comptime Source: type) type {
     return struct {
         source: Source,
         io: std.Io,
+        allocator: std.mem.Allocator,
         loops: usize,
         window: Window,
         mutex: std.Io.Mutex = .init,
@@ -343,6 +407,12 @@ fn Shared(comptime Job: type, comptime Source: type) type {
         /// When a connect that may be cut short last got an answer
         /// (ns, nowNs's clock).
         last_cuttable_answer_ns: std.atomic.Value(i64) = .init(0),
+        /// Connects to the machine's own address that succeeded, for
+        /// `run` to confirm at the end.
+        unconfirmed: std.ArrayList(Job) = .empty,
+        /// A loop gave up on the run (see STALL_LIMIT_NS): the others
+        /// start nothing more either.
+        starved: std.atomic.Value(bool) = .init(false),
 
         const NO_CAP = 0;
 
@@ -364,15 +434,21 @@ fn Shared(comptime Job: type, comptime Source: type) type {
 
         /// Report verdicts that all came in by `now_ns`: their round
         /// trips were measured then, so reporting them together adds
-        /// nothing to them.
+        /// nothing to them. An unconfirmed one is held back for `run`
+        /// to confirm; if there is no memory to hold it, it counts as
+        /// open, as it did before confirming.
         fn done(self: *@This(), settled: []const Settled(Job), now_ns: i96) void {
             if (settled.len == 0) return;
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             for (settled) |s| {
-                self.window.observe(s.outcome, s.elapsed_us, now_ns);
-                self.source.done(s.job, s.outcome, s.elapsed_us);
-                if (s.outcome != .filtered and s.job.target.cut_floor_ms != null) {
+                const outcome: Outcome = switch (s.verdict) {
+                    .unconfirmed => if (self.unconfirmed.append(self.allocator, s.job)) continue else |_| .open,
+                    else => s.verdict.alone(),
+                };
+                self.window.observe(outcome, s.elapsed_us, now_ns);
+                self.source.done(s.job, outcome, s.elapsed_us);
+                if (outcome != .filtered and s.job.target.cut_floor_ms != null) {
                     self.last_cuttable_answer_ns.store(@intCast(now_ns), .monotonic);
                 }
             }
@@ -387,6 +463,12 @@ fn Shared(comptime Job: type, comptime Source: type) type {
                 .wait_ms = if (cap == NO_CAP) null else cap,
                 .last_answer_ns = self.last_cuttable_answer_ns.load(.monotonic),
             };
+        }
+
+        /// A suspect (see Held) whose failure turned out to be its own
+        /// target's: unanswered. Rare enough to take the lock alone.
+        fn unanswered(self: *@This(), job: Job, now_ns: i96) void {
+            self.done(&.{.{ .job = job, .verdict = .filtered, .elapsed_us = 0 }}, now_ns);
         }
     };
 }
@@ -404,45 +486,76 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
     // flight, or a batch that settled as it started.
     const settled = try allocator.alloc(Settled(Job), @max(capacity, START_BATCH));
     defer allocator.free(settled);
+    var held: Held(Job) = .{};
 
     var dry = false;
     while (true) {
-        // Top up, a batch at a time, while the window has room.
+        if (shared.starved.load(.monotonic)) {
+            // The run is over: only the connects in flight still settle.
+            held = .{};
+            dry = true;
+        }
+
+        // Top up, a batch at a time, while the window has room: first
+        // the connects that could not start, once their pause is over.
         var room_left = false;
         var batch: usize = 0;
         var count: usize = 0;
-        while (!dry and flight.len < flight.jobs.len) : (batch += 1) {
+        while (flight.len < flight.jobs.len) : (batch += 1) {
             if (batch == START_BATCH) {
                 room_left = true;
                 break;
             }
-            const job: Job = switch (shared.take(flight.len)) {
-                .job => |job| job,
-                .full => break,
-                .dry => {
-                    dry = true;
-                    break;
-                },
-            };
             const started = nowNs(io);
-            switch (start(job.target)) {
-                .done => |outcome| {
-                    settled[count] = .{ .job = job, .outcome = outcome, .elapsed_us = elapsedUs(started, nowNs(io)) };
+            const job: Job = if (held.due(started)) held.pop() else if (!held.open()) break else take: {
+                if (!dry) switch (shared.take(flight.len)) {
+                    .job => |job| break :take job,
+                    .full => break,
+                    .dry => dry = true,
+                };
+                // No target left to tell a suspect from a shortage: it
+                // counts as unanswered, as it always did.
+                if (held.dropSuspect()) |suspect| shared.unanswered(suspect, started);
+                break;
+            };
+            const attempt = start(job.target);
+            if (attempt == .unprobed) {
+                if (!held.hold(job, attempt.unprobed, started)) {
+                    shared.starved.store(true, .monotonic);
+                    held = .{};
+                    dry = true;
+                }
+                continue;
+            }
+            if (held.started()) |suspect| shared.unanswered(suspect, started);
+            switch (attempt) {
+                .done => |verdict| {
+                    settled[count] = .{ .job = job, .verdict = verdict, .elapsed_us = elapsedUs(started, nowNs(io)) };
                     count += 1;
                 },
                 .pending => |sock| flight.add(job, sock, started),
+                .unprobed => unreachable,
             }
         }
         shared.done(settled[0..count], nowNs(io));
         if (flight.len == 0) {
-            if (dry) return;
+            if (held.short) {
+                // Nothing in flight to free what is short: pause.
+                const now = nowNs(io);
+                if (held.retry_at > now) io.sleep(.fromNanoseconds(held.retry_at - now), .awake) catch {};
+                continue;
+            }
+            if (dry and held.len == 0) return;
             continue;
         }
 
-        // Sleep until something settles or the earliest deadline, or
-        // just look, when the batch stopped short of the window.
+        // Sleep until something settles, the earliest deadline or the
+        // next try at a connect that could not start, or just look,
+        // when the batch stopped short of the window.
         const now = nowNs(io);
-        const wait_ms = if (room_left) 0 else msUntil(now, flight.earliestWake(shared.cut(), now));
+        const wake = flight.earliestWake(shared.cut(), now);
+        const until = if (held.short) @min(held.retry_at, wake) else wake;
+        const wait_ms = if (room_left) 0 else msUntil(now, until);
         waitSettled(flight.socks[0..flight.len], flight.fds, wait_ms, flight.settled[0..flight.len]);
 
         // Report everything that settled or ran out of time. Walking
@@ -457,7 +570,7 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
             if (!answered and after < flight.deadline(i, cut)) continue;
             settled[count] = .{
                 .job = flight.jobs[i],
-                .outcome = finish(flight.socks[i], answered),
+                .verdict = finish(flight.socks[i], answered),
                 .elapsed_us = elapsedUs(flight.started[i], after),
             };
             count += 1;
@@ -465,6 +578,90 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
         }
         shared.done(settled[0..count], after);
     }
+}
+
+/// Connects a loop took from its source but could not start, for want
+/// of something on this machine (see Shortage). The loop tries them
+/// again before anything new, after a pause that doubles while the
+/// shortage lasts (FIRST_PAUSE_NS up to MAX_PAUSE_NS), and gives up on
+/// the run once it has lasted STALL_LIMIT_NS. Meanwhile it starts
+/// nothing new, so its connects in flight settle and free their
+/// sockets. Before, such a connect counted as unanswered: a scan that
+/// ran out of sockets reported every port it never probed as filtered,
+/// and on macOS finished a full loopback range in 30 ms with no open
+/// ports.
+///
+/// A lone `.address` failure while connects were starting fine is only
+/// a suspect: the target itself may be one no connect can reach. The
+/// loop goes on to the next target; if that one starts, the suspect
+/// counts as unanswered, as it always did, and if not, the shortage is
+/// real and both wait. Hence two at most.
+fn Held(comptime Job: type) type {
+    return struct {
+        jobs: [2]Job = undefined,
+        len: usize = 0,
+        /// jobs[0] is a suspect, waiting on the next target's start.
+        suspect: bool = false,
+        /// The last start failed: short of something since `since`.
+        short: bool = false,
+        since: i96 = 0,
+        retry_at: i96 = 0,
+        pause: i96 = FIRST_PAUSE_NS,
+
+        const Self = @This();
+
+        /// Whether jobs[0] is to be tried again now.
+        fn due(self: *const Self, now: i96) bool {
+            return self.len > 0 and !self.suspect and (!self.short or now >= self.retry_at);
+        }
+
+        /// Whether the loop may take new connects from its source: not
+        /// while short, except one to test a suspect against.
+        fn open(self: *const Self) bool {
+            return self.len == 0 or self.suspect;
+        }
+
+        fn pop(self: *Self) Job {
+            const job = self.jobs[0];
+            self.jobs[0] = self.jobs[1];
+            self.len -= 1;
+            return job;
+        }
+
+        /// A connect could not start at `now`. False once the shortage
+        /// has lasted STALL_LIMIT_NS: time to give up.
+        fn hold(self: *Self, job: Job, shortage: Shortage, now: i96) bool {
+            std.debug.assert(self.len < self.jobs.len);
+            self.jobs[self.len] = job;
+            self.len += 1;
+            if (shortage == .address and !self.short and self.len == 1) {
+                self.suspect = true;
+                return true;
+            }
+            self.suspect = false;
+            if (!self.short) {
+                self.short = true;
+                self.since = now;
+                self.pause = FIRST_PAUSE_NS;
+            }
+            self.retry_at = now + self.pause;
+            self.pause = @min(2 * self.pause, MAX_PAUSE_NS);
+            return now - self.since < STALL_LIMIT_NS;
+        }
+
+        /// A connect started, so nothing is short any more. Returns the
+        /// suspect, if any: its failure was its target's own.
+        fn started(self: *Self) ?Job {
+            self.short = false;
+            return self.dropSuspect();
+        }
+
+        fn dropSuspect(self: *Self) ?Job {
+            if (!self.suspect) return null;
+            self.suspect = false;
+            return self.pop();
+        }
+    };
 }
 
 /// The connects in flight, as parallel arrays, so the sockets can go
@@ -560,12 +757,25 @@ fn Flight(comptime Job: type) type {
 }
 
 /// Connect to one target and wait for its verdict, on this thread.
-/// The single-connect form of `run`, for callers that need just one.
+/// The single-connect form of `run`, for callers that need just one;
+/// with no other connect of theirs in flight, a connect to the machine
+/// itself that succeeds met a listener (see Verdict.alone).
 pub fn connectOnce(io: std.Io, target: Target) Outcome {
-    const started = nowNs(io);
-    const sock = switch (start(target)) {
-        .done => |outcome| return outcome,
-        .pending => |sock| sock,
+    // A connect that cannot start waits as in a run (see Held). Alone,
+    // though, nothing tells a target no connect can reach from used-up
+    // ports, so `.address` counts as unanswered, as does a shortage
+    // that outlasts STALL_LIMIT_NS.
+    const first = nowNs(io);
+    var started = first;
+    var pause: i96 = FIRST_PAUSE_NS;
+    const sock = while (true) : (started = nowNs(io)) {
+        switch (start(target)) {
+            .done => |verdict| return verdict.alone(),
+            .pending => |sock| break sock,
+            .unprobed => |shortage| if (shortage == .address or started - first >= STALL_LIMIT_NS) return .filtered,
+        }
+        io.sleep(.fromNanoseconds(pause), .awake) catch {};
+        pause = @min(2 * pause, MAX_PAUSE_NS);
     };
     const deadline = started + @as(i96, target.timeout_ms) * std.time.ns_per_ms;
     var settled = [1]u8{0};
@@ -576,14 +786,42 @@ pub fn connectOnce(io: std.Io, target: Target) Outcome {
         waitSettled(&.{sock}, &fds, msUntil(now, deadline), &settled);
         if (settled[0] != 0) break;
     }
-    return finish(sock, settled[0] != 0);
+    return finish(sock, settled[0] != 0).alone();
+}
+
+/// What `run` reports for a connect to `target` that has settled on
+/// `sock`, closing it. For tests that make the socket themselves: a
+/// crossed pair (see connected), say, which run's own connects make
+/// only by chance. Like run, it confirms an unconfirmed connect with
+/// one more, which the caller makes sure is the only one in flight.
+pub fn settledVerdict(io: std.Io, sock: Socket, target: Target) Outcome {
+    return switch (finish(sock, true)) {
+        .unconfirmed => connectOnce(io, target),
+        else => |verdict| verdict.alone(),
+    };
 }
 
 const Started = union(enum) {
     /// Settled at once (loopback often refuses right away).
-    done: Outcome,
+    done: Verdict,
     /// In flight: wait on it, then finish it.
     pending: Socket,
+    /// Never sent, for want of something on this machine: no word on
+    /// the target at all.
+    unprobed: Shortage,
+};
+
+/// What a connect that could not start was short of.
+const Shortage = enum {
+    /// A socket (out of descriptors, or kernel memory: macOS's ENOBUFS,
+    /// see STALL_LIMIT_NS), or buffers to connect it with. Always this
+    /// machine's doing.
+    socket,
+    /// A local port to connect from (EADDRNOTAVAIL): the ephemeral
+    /// ports are used up, or the target is one no connect can reach,
+    /// such as port 0 on macOS and Windows or 0.0.0.0 on Windows. Only
+    /// another target can tell which (see Held).
+    address,
 };
 
 /// Begin a non-blocking connect.
@@ -594,14 +832,17 @@ fn start(target: Target) Started {
             .open => .{ .done = .open },
             .refused => .{ .done = .refused },
             .filtered => .{ .done = .filtered },
+            .unconfirmed => .{ .done = .unconfirmed },
             .pending => .{ .pending = sock },
+            .no_socket => .{ .unprobed = .socket },
+            .no_address => .{ .unprobed = .address },
         };
     }
 
     // A blocking connect to a dead host stalls ~75s in SYN retransmits,
     // so the socket goes non-blocking before connecting.
     const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
-    if (fd < 0) return .{ .done = .filtered };
+    if (fd < 0) return .{ .unprobed = .socket };
 
     const raw_flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
     // O_NONBLOCK lives in a packed bit struct on macOS, so flip the bit
@@ -610,7 +851,7 @@ fn start(target: Target) Started {
     oflags.NONBLOCK = true;
     if (raw_flags < 0 or std.c.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(oflags))) < 0) {
         _ = std.c.close(fd);
-        return .{ .done = .filtered };
+        return .{ .unprobed = .socket };
     }
 
     var addr = std.posix.sockaddr.in{
@@ -620,14 +861,17 @@ fn start(target: Target) Started {
         .addr = @bitCast(target.ip),
     };
     const rc = std.c.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
-    const outcome: Outcome = if (rc == 0) connected(fd) else switch (std.c.errno(rc)) {
+    const started: Started = if (rc == 0) .{ .done = connected(fd) } else switch (std.c.errno(rc)) {
         // In progress. An interrupted connect carries on in the
         // background just the same.
         .INPROGRESS, .INTR => return .{ .pending = fd },
-        else => |err| classify(@backingInt(err)),
+        // Short of something here: nothing went out.
+        .NOBUFS, .NOMEM, .AGAIN => .{ .unprobed = .socket },
+        .ADDRNOTAVAIL => .{ .unprobed = .address },
+        else => |err| .{ .done = classify(@backingInt(err)) },
     };
     _ = std.c.close(fd);
-    return .{ .done = outcome };
+    return started;
 }
 
 /// Wait at most wait_ms for any of `socks` to settle, setting
@@ -651,12 +895,13 @@ fn waitSettled(socks: []const Socket, fds: []PollFd, wait_ms: c_int, settled: []
 /// A pending connect's verdict, closing its socket. `settled` false
 /// means its deadline came first: still in flight then is "no answer",
 /// never "open", but a refusal that just landed still counts.
-fn finish(sock: Socket, settled: bool) Outcome {
+fn finish(sock: Socket, settled: bool) Verdict {
     if (comptime is_windows) {
         return switch (c_bindings.tcpProbeFinish(sock, settled)) {
             .open => .open,
             .refused => .refused,
-            .filtered, .pending => .filtered,
+            .unconfirmed => .unconfirmed,
+            .filtered, .pending, .no_socket, .no_address => .filtered,
         };
     }
     defer _ = std.c.close(sock);
@@ -670,28 +915,40 @@ fn finish(sock: Socket, settled: bool) Outcome {
     return classify(so_error);
 }
 
-/// The verdict on a connect that succeeded: open, unless it reached
-/// its own socket. When a connect to one of the machine's own
-/// addresses happens to get the target port as its source port, the
-/// OS completes it as a simultaneous open with itself, so it succeeds
-/// with nothing listening. `ns -p 127.0.0.1 1-65535` reported such
-/// phantom ports, inside the ephemeral range, in most runs on Linux
-/// and in some on Windows (#90). Nothing answered, so it counts as
-/// refused.
-fn connected(fd: std.posix.fd_t) Outcome {
+/// The verdict on a connect that succeeded. To another host it is
+/// open. To one of the machine's own addresses (local and peer address
+/// equal) it may have met no listener at all, because the OS completes
+/// two connects whose SYNs meet as a simultaneous open:
+///
+/// - A connect that gets the target port as its source port meets
+///   itself. `ns -p 127.0.0.1 1-65535` reported such phantom ports,
+///   inside the ephemeral range, in most runs on Linux and in some on
+///   Windows (#90). Nothing answered, so it counts as refused.
+/// - Two connects in flight at once can meet each other: one from port
+///   A to port B while the other goes from B to A. Both succeed. On
+///   macOS a full loopback scan reported such pairs of nearby ephemeral
+///   ports, 8-50 of them, in about 1 run in 200. Each side looks like
+///   any connect to a listener, so it is unconfirmed: `run` connects
+///   to the port again once nothing else is in flight, when a crossed
+///   pair cannot form.
+///
+/// Telling the pair apart as it happens would take a table of every
+/// source port in flight, and a getsockname for every connect, scans of
+/// other hosts included; this costs them nothing.
+fn connected(fd: std.posix.fd_t) Verdict {
     var local: std.posix.sockaddr.in = undefined;
     var peer: std.posix.sockaddr.in = undefined;
     var local_len: std.posix.socklen_t = @sizeOf(@TypeOf(local));
     var peer_len: std.posix.socklen_t = @sizeOf(@TypeOf(peer));
     if (std.c.getsockname(fd, @ptrCast(&local), &local_len) != 0) return .open;
     if (std.c.getpeername(fd, @ptrCast(&peer), &peer_len) != 0) return .open;
-    const self = local.port == peer.port and local.addr == peer.addr;
-    return if (self) .refused else .open;
+    if (local.addr != peer.addr) return .open;
+    return if (local.port == peer.port) .refused else .unconfirmed;
 }
 
 /// POSIX: only an actively refused connection proves "closed but
 /// present"; every other error (timeout, unreachable, ...) is silence.
-fn classify(so_error: c_int) Outcome {
+fn classify(so_error: c_int) Verdict {
     return switch (so_error) {
         0 => .open,
         @backingInt(std.posix.E.CONNREFUSED), @backingInt(std.posix.E.CONNRESET) => .refused,
