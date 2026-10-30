@@ -35,6 +35,8 @@ const int layout_tcp_probe_open = TCP_PROBE_OPEN;
 const int layout_tcp_probe_refused = TCP_PROBE_REFUSED;
 const int layout_tcp_probe_filtered = TCP_PROBE_FILTERED;
 const int layout_tcp_probe_pending = TCP_PROBE_PENDING;
+const int layout_tcp_probe_no_socket = TCP_PROBE_NO_SOCKET;
+const int layout_tcp_probe_no_address = TCP_PROBE_NO_ADDRESS;
 const int layout_tcp_probe_max_sockets = TCP_PROBE_MAX_SOCKETS;
 
 const size_t layout_mc_socket_size = sizeof(mc_socket);

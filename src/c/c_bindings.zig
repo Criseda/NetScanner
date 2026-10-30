@@ -119,6 +119,8 @@ pub const TcpProbe = enum(c_int) {
     refused = 1,
     filtered = 2,
     pending = 3,
+    no_socket = 4,
+    no_address = 5,
 };
 
 fn toTcpProbe(raw: c_int) TcpProbe {
@@ -126,13 +128,16 @@ fn toTcpProbe(raw: c_int) TcpProbe {
         @backingInt(TcpProbe.open) => .open,
         @backingInt(TcpProbe.refused) => .refused,
         @backingInt(TcpProbe.pending) => .pending,
+        @backingInt(TcpProbe.no_socket) => .no_socket,
+        @backingInt(TcpProbe.no_address) => .no_address,
         else => .filtered,
     };
 }
 
 /// Windows: begin a non-blocking connect to ip:port. `.pending` leaves
 /// the socket in `out_sock` for tcpProbeWait and tcpProbeFinish; any
-/// other result is final and the socket is already closed.
+/// other result is final and the socket is already closed, and
+/// `.no_socket` and `.no_address` mean it never went out.
 pub fn tcpProbeStart(ip: [4]u8, port: u16, timeout_ms: c_int, out_sock: *usize) TcpProbe {
     return toTcpProbe(c.tcp_probe_start(&ip, port, timeout_ms, out_sock));
 }

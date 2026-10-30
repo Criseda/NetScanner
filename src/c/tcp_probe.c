@@ -71,16 +71,18 @@ tcp_probe_result tcp_probe_start(const unsigned char ip[4], unsigned short port,
                                  int timeout_ms, uintptr_t *out_sock) {
   win_wsa_init_once();
 
+  // Out of sockets (WSAENOBUFS, WSAEMFILE) is this machine's doing,
+  // not the target's silence: the caller tries again later.
   SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (sock == INVALID_SOCKET) {
-    return TCP_PROBE_FILTERED;
+    return TCP_PROBE_NO_SOCKET;
   }
 
   // Non-blocking so a dead host cannot stall us in SYN retransmits.
   u_long nonblocking = 1;
   if (ioctlsocket(sock, FIONBIO, &nonblocking) != 0) {
     closesocket(sock);
-    return TCP_PROBE_FILTERED;
+    return TCP_PROBE_NO_SOCKET;
   }
   refuse_fast(sock, timeout_ms);
 
@@ -98,7 +100,17 @@ tcp_probe_result tcp_probe_start(const unsigned char ip[4], unsigned short port,
   const int connect_error = WSAGetLastError();
   if (connect_error != WSAEWOULDBLOCK) {
     closesocket(sock);
-    return classify(connect_error);
+    switch (connect_error) {
+    // Nothing went out: no buffers, or no ephemeral port left (which
+    // Windows reports either way), or a target no connect can reach.
+    case WSAENOBUFS:
+      return TCP_PROBE_NO_SOCKET;
+    case WSAEADDRNOTAVAIL:
+    case WSAEADDRINUSE:
+      return TCP_PROBE_NO_ADDRESS;
+    default:
+      return classify(connect_error);
+    }
   }
   *out_sock = (uintptr_t)sock;
   return TCP_PROBE_PENDING;

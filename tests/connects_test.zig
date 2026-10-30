@@ -223,10 +223,137 @@ test "run with nothing to do returns at once" {
     try std.testing.expectEqual(@as(usize, 0), recorder.reports);
 }
 
+test "run waits for sockets instead of reporting unprobed ports as unanswered" {
+    if (builtin.single_threaded or builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+
+    var bound = bindLoopbackAbove(io, 48631, 20) orelse return error.SkipZigTest;
+    defer bound.server.deinit(io);
+    var ports: [50]u16 = @splat(9);
+    ports[ports.len - 1] = bound.port;
+    var outcomes: [ports.len]?connects.Outcome = @splat(null);
+    var recorder: Recorder = .{ .ports = &ports, .outcomes = &outcomes };
+
+    // Every descriptor taken: socket() fails with EMFILE until the
+    // fillers close, a while into the run.
+    var fillers: Fillers = try .fill();
+    defer fillers.restore();
+    const release_ms = 100;
+    const releaser = try std.Thread.spawn(.{}, Fillers.closeAfter, .{ &fillers, io, release_ms });
+    defer releaser.join();
+
+    const started = std.Io.Clock.now(.awake, io);
+    try connects.run(Recorder.Job, std.testing.allocator, io, &recorder, .adaptive);
+    const elapsed = started.durationTo(std.Io.Clock.now(.awake, io));
+
+    // It did run short, and waited instead of calling the ports silent.
+    try std.testing.expect(elapsed.nanoseconds >= (release_ms - 10) * ms);
+    try std.testing.expectEqual(ports.len, recorder.reports);
+    for (outcomes[0 .. ports.len - 1]) |o| try std.testing.expectEqual(@as(?connects.Outcome, .refused), o);
+    try std.testing.expectEqual(@as(?connects.Outcome, .open), outcomes[ports.len - 1]);
+}
+
+test "run gives up with OutOfSockets when no socket comes, reporting nothing" {
+    if (builtin.single_threaded or builtin.os.tag == .windows) return error.SkipZigTest;
+    var ports: [20]u16 = @splat(9);
+    var outcomes: [ports.len]?connects.Outcome = @splat(null);
+    var recorder: Recorder = .{ .ports = &ports, .outcomes = &outcomes };
+
+    var fillers: Fillers = try .fill();
+    defer fillers.restore();
+    try std.testing.expectError(
+        error.OutOfSockets,
+        connects.run(Recorder.Job, std.testing.allocator, std.testing.io, &recorder, .adaptive),
+    );
+    try std.testing.expectEqual(@as(usize, 0), recorder.reports);
+}
+
+test "a target no connect can reach is unanswered, without waiting" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const io = std.testing.io;
+
+    var bound = bindLoopbackAbove(io, 48631, 20) orelse return error.SkipZigTest;
+    defer bound.server.deinit(io);
+    // A connect to port 0 fails with EADDRNOTAVAIL on macOS and
+    // Windows, as one does when the ephemeral ports are used up. The
+    // ports after it start fine, so it is the target's own doing; alone,
+    // there is nothing to tell, and it counts as unanswered as before.
+    var many: [20]u16 = @splat(9);
+    many[0] = 0;
+    many[many.len - 1] = bound.port;
+    for ([_][]const u16{ &many, &.{0} }) |ports| {
+        var outcomes: [many.len]?connects.Outcome = @splat(null);
+        var recorder: Recorder = .{ .ports = ports, .outcomes = outcomes[0..ports.len] };
+        const started = std.Io.Clock.now(.awake, io);
+        try connects.run(Recorder.Job, std.testing.allocator, io, &recorder, .adaptive);
+        const elapsed = started.durationTo(std.Io.Clock.now(.awake, io));
+
+        try std.testing.expect(elapsed.nanoseconds < 1000 * ms);
+        try std.testing.expectEqual(ports.len, recorder.reports);
+        try std.testing.expect(outcomes[0].? != .open);
+        if (ports.len == 1) continue;
+        for (outcomes[1 .. ports.len - 1]) |o| try std.testing.expectEqual(@as(?connects.Outcome, .refused), o);
+        try std.testing.expectEqual(@as(?connects.Outcome, .open), outcomes[ports.len - 1]);
+    }
+}
+
 test "inFlightLimit allows at least one connect and at most MAX_IN_FLIGHT" {
     const limit = connects.inFlightLimit();
     try std.testing.expect(limit >= 1 and limit <= connects.MAX_IN_FLIGHT);
 }
+
+/// Every free descriptor in the process, held by copies of one pipe end,
+/// so socket() fails with EMFILE: running out of sockets, without root.
+/// The soft open-file limit is set first to what connects.run would
+/// raise it to (at most 2048 descriptors to fill), so run leaves it be.
+/// POSIX only.
+const Fillers = struct {
+    pipe: [2]std.posix.fd_t,
+    fds: [4096]std.posix.fd_t = undefined,
+    len: usize = 0,
+    saved: std.posix.rlimit,
+
+    fn fill() !Fillers {
+        const saved = try std.posix.getrlimit(.NOFILE);
+        _ = connects.inFlightLimit();
+        var limits = try std.posix.getrlimit(.NOFILE);
+        if (limits.cur == std.posix.RLIM.INFINITY or limits.cur > 2048) limits.cur = 2048;
+        try std.posix.setrlimit(.NOFILE, limits);
+
+        var self: Fillers = .{ .pipe = undefined, .saved = saved };
+        if (std.c.pipe(&self.pipe) != 0) return error.SkipZigTest;
+        while (self.len < self.fds.len) {
+            const fd = std.c.dup(self.pipe[0]);
+            if (fd < 0) break;
+            self.fds[self.len] = fd;
+            self.len += 1;
+        }
+        // Make sure the table really is full.
+        const probe = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+        if (probe >= 0) {
+            _ = std.c.close(probe);
+            self.restore();
+            return error.SkipZigTest;
+        }
+        return self;
+    }
+
+    fn close(self: *Fillers) void {
+        for (self.fds[0..self.len]) |fd| _ = std.c.close(fd);
+        self.len = 0;
+    }
+
+    fn closeAfter(self: *Fillers, io: std.Io, delay_ms: i64) void {
+        io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
+        self.close();
+    }
+
+    fn restore(self: *Fillers) void {
+        self.close();
+        for (self.pipe) |fd| _ = std.c.close(fd);
+        std.posix.setrlimit(.NOFILE, self.saved) catch {};
+    }
+};
 
 /// Bind 127.0.0.1 on the first free port at or above `from`.
 /// Returns null when nothing nearby is free, so callers can skip
