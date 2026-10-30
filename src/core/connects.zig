@@ -26,6 +26,28 @@ pub const Outcome = enum {
     filtered, // Timeout or unreachable: no answer at all.
 };
 
+/// What a connect found, before a run reports it: an Outcome, or a
+/// connect to one of the machine's own addresses that succeeded and is
+/// not yet known to have met a listener (see connected).
+const Verdict = enum {
+    open,
+    refused,
+    filtered,
+    unconfirmed,
+
+    /// The Outcome of a connect that was the only one in flight. A
+    /// connect to the machine's own address can then only have met a
+    /// listener: there was no other connect for it to meet, and one
+    /// that met itself is refused already.
+    fn alone(self: Verdict) Outcome {
+        return switch (self) {
+            .open, .unconfirmed => .open,
+            .refused => .refused,
+            .filtered => .filtered,
+        };
+    }
+};
+
 /// One connect to make: where to, and how long to wait for an answer.
 pub const Target = struct {
     ip: [4]u8,
@@ -50,7 +72,7 @@ comptime {
 
 const is_windows = builtin.os.tag == .windows;
 /// A connect in flight: a Winsock SOCKET, or a file descriptor.
-const Socket = if (is_windows) usize else std.posix.fd_t;
+pub const Socket = if (is_windows) usize else std.posix.fd_t;
 /// poll()'s per-socket record; Windows waits through select() instead.
 const PollFd = if (is_windows) void else std.posix.pollfd;
 
@@ -95,22 +117,30 @@ pub fn inFlightLimit() usize {
 /// there), but calls into `source` are serialized, one at a time, so
 /// it needs no locks of its own.
 ///
+/// A connect to one of the machine's own addresses that succeeds may
+/// have met another of the run's connects rather than a listener (see
+/// connected). Such a port is reported last: once every other connect
+/// has settled, it gets one more, alone, and that one's verdict counts.
+///
 /// A connect this machine cannot start (no socket, no local port to
 /// send from) waits and is tried again (see Held): it is never reported
 /// as unanswered, since it never asked the target anything. Fails when
 /// nothing at all could be set up, or with error.OutOfSockets when a
-/// connect could not start for STALL_LIMIT_NS; `done` is never called
-/// for the connects that did not start.
+/// connect could not start for STALL_LIMIT_NS; `done` is then never
+/// called for the connects that did not start, nor for those still to
+/// be confirmed.
 pub fn run(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, source: anytype, pace: Pace) !void {
     const limit = inFlightLimit();
     const loops = @min(loopCount(), limit);
     var shared: Shared(Job, @TypeOf(source)) = .{
         .source = source,
         .io = io,
+        .allocator = allocator,
         .loops = loops,
         // Every loop holds at least one connect.
         .window = .init(@max(loops, @min(POOL_PACE, limit)), limit, pace),
     };
+    defer shared.unconfirmed.deinit(allocator);
     // Each loop can hold an even share of the largest window.
     const capacity = std.math.divCeil(usize, limit, loops) catch unreachable;
 
@@ -125,6 +155,15 @@ pub fn run(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, source:
         try loop(Job, allocator, io, &shared, capacity);
     }
     if (shared.starved.load(.monotonic)) return error.OutOfSockets;
+
+    // Every loop has finished, so these connects are the only ones in
+    // flight, one at a time. On loopback each takes well under a
+    // millisecond, and only a scan of the machine itself has any.
+    for (shared.unconfirmed.items) |job| {
+        const started = nowNs(io);
+        const outcome = connectOnce(io, job.target);
+        source.done(job, outcome, elapsedUs(started, nowNs(io)));
+    }
 }
 
 /// How long a loop goes on retrying a connect it cannot start (see
@@ -321,9 +360,13 @@ fn Shared(comptime Job: type, comptime Source: type) type {
     return struct {
         source: Source,
         io: std.Io,
+        allocator: std.mem.Allocator,
         loops: usize,
         window: Window,
         mutex: std.Io.Mutex = .init,
+        /// Connects to the machine's own address that succeeded, for
+        /// `run` to confirm at the end.
+        unconfirmed: std.ArrayList(Job) = .empty,
         /// A loop gave up on the run (see STALL_LIMIT_NS): the others
         /// start nothing more either.
         starved: std.atomic.Value(bool) = .init(false),
@@ -344,9 +387,16 @@ fn Shared(comptime Job: type, comptime Source: type) type {
             return if (self.source.next()) |job| .{ .job = job } else .dry;
         }
 
-        fn done(self: *@This(), job: Job, outcome: Outcome, elapsed_us: u64) void {
+        /// One connect's verdict, reported to the source, or held back
+        /// for `run` to confirm when unconfirmed. If there is no memory
+        /// to hold it, it counts as open, as it did before confirming.
+        fn done(self: *@This(), job: Job, verdict: Verdict, elapsed_us: u64) void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            const outcome: Outcome = switch (verdict) {
+                .unconfirmed => if (self.unconfirmed.append(self.allocator, job)) return else |_| .open,
+                else => verdict.alone(),
+            };
             self.window.observe(outcome, elapsed_us, nowNs(self.io));
             self.source.done(job, outcome, elapsed_us);
         }
@@ -404,7 +454,7 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
             }
             if (held.started()) |suspect| shared.done(suspect, .filtered, 0);
             switch (attempt) {
-                .done => |outcome| shared.done(job, outcome, elapsedUs(started, nowNs(io))),
+                .done => |verdict| shared.done(job, verdict, elapsedUs(started, nowNs(io))),
                 .pending => |sock| flight.add(job, sock, started),
                 .unprobed => unreachable,
             }
@@ -436,11 +486,11 @@ fn loop(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, shared: an
             i -= 1;
             const settled = flight.settled[i] != 0;
             if (!settled and after < flight.deadlines[i]) continue;
-            const outcome = finish(flight.socks[i], settled);
+            const verdict = finish(flight.socks[i], settled);
             const job = flight.jobs[i];
             const elapsed = elapsedUs(flight.started[i], after);
             flight.remove(i);
-            shared.done(job, outcome, elapsed);
+            shared.done(job, verdict, elapsed);
         }
     }
 }
@@ -595,7 +645,9 @@ fn Flight(comptime Job: type) type {
 }
 
 /// Connect to one target and wait for its verdict, on this thread.
-/// The single-connect form of `run`, for callers that need just one.
+/// The single-connect form of `run`, for callers that need just one;
+/// with no other connect of theirs in flight, a connect to the machine
+/// itself that succeeds met a listener (see Verdict.alone).
 pub fn connectOnce(io: std.Io, target: Target) Outcome {
     // A connect that cannot start waits as in a run (see Held). Alone,
     // though, nothing tells a target no connect can reach from used-up
@@ -606,7 +658,7 @@ pub fn connectOnce(io: std.Io, target: Target) Outcome {
     var pause: i96 = FIRST_PAUSE_NS;
     const sock = while (true) : (started = nowNs(io)) {
         switch (start(target)) {
-            .done => |outcome| return outcome,
+            .done => |verdict| return verdict.alone(),
             .pending => |sock| break sock,
             .unprobed => |shortage| if (shortage == .address or started - first >= STALL_LIMIT_NS) return .filtered,
         }
@@ -622,12 +674,24 @@ pub fn connectOnce(io: std.Io, target: Target) Outcome {
         waitSettled(&.{sock}, &fds, msUntil(now, deadline), &settled);
         if (settled[0] != 0) break;
     }
-    return finish(sock, settled[0] != 0);
+    return finish(sock, settled[0] != 0).alone();
+}
+
+/// What `run` reports for a connect to `target` that has settled on
+/// `sock`, closing it. For tests that make the socket themselves: a
+/// crossed pair (see connected), say, which run's own connects make
+/// only by chance. Like run, it confirms an unconfirmed connect with
+/// one more, which the caller makes sure is the only one in flight.
+pub fn settledVerdict(io: std.Io, sock: Socket, target: Target) Outcome {
+    return switch (finish(sock, true)) {
+        .unconfirmed => connectOnce(io, target),
+        else => |verdict| verdict.alone(),
+    };
 }
 
 const Started = union(enum) {
     /// Settled at once (loopback often refuses right away).
-    done: Outcome,
+    done: Verdict,
     /// In flight: wait on it, then finish it.
     pending: Socket,
     /// Never sent, for want of something on this machine: no word on
@@ -656,6 +720,7 @@ fn start(target: Target) Started {
             .open => .{ .done = .open },
             .refused => .{ .done = .refused },
             .filtered => .{ .done = .filtered },
+            .unconfirmed => .{ .done = .unconfirmed },
             .pending => .{ .pending = sock },
             .no_socket => .{ .unprobed = .socket },
             .no_address => .{ .unprobed = .address },
@@ -718,11 +783,12 @@ fn waitSettled(socks: []const Socket, fds: []PollFd, wait_ms: c_int, settled: []
 /// A pending connect's verdict, closing its socket. `settled` false
 /// means its deadline came first: still in flight then is "no answer",
 /// never "open", but a refusal that just landed still counts.
-fn finish(sock: Socket, settled: bool) Outcome {
+fn finish(sock: Socket, settled: bool) Verdict {
     if (comptime is_windows) {
         return switch (c_bindings.tcpProbeFinish(sock, settled)) {
             .open => .open,
             .refused => .refused,
+            .unconfirmed => .unconfirmed,
             .filtered, .pending, .no_socket, .no_address => .filtered,
         };
     }
@@ -737,28 +803,40 @@ fn finish(sock: Socket, settled: bool) Outcome {
     return classify(so_error);
 }
 
-/// The verdict on a connect that succeeded: open, unless it reached
-/// its own socket. When a connect to one of the machine's own
-/// addresses happens to get the target port as its source port, the
-/// OS completes it as a simultaneous open with itself, so it succeeds
-/// with nothing listening. `ns -p 127.0.0.1 1-65535` reported such
-/// phantom ports, inside the ephemeral range, in most runs on Linux
-/// and in some on Windows (#90). Nothing answered, so it counts as
-/// refused.
-fn connected(fd: std.posix.fd_t) Outcome {
+/// The verdict on a connect that succeeded. To another host it is
+/// open. To one of the machine's own addresses (local and peer address
+/// equal) it may have met no listener at all, because the OS completes
+/// two connects whose SYNs meet as a simultaneous open:
+///
+/// - A connect that gets the target port as its source port meets
+///   itself. `ns -p 127.0.0.1 1-65535` reported such phantom ports,
+///   inside the ephemeral range, in most runs on Linux and in some on
+///   Windows (#90). Nothing answered, so it counts as refused.
+/// - Two connects in flight at once can meet each other: one from port
+///   A to port B while the other goes from B to A. Both succeed. On
+///   macOS a full loopback scan reported such pairs of nearby ephemeral
+///   ports, 8-50 of them, in about 1 run in 200. Each side looks like
+///   any connect to a listener, so it is unconfirmed: `run` connects
+///   to the port again once nothing else is in flight, when a crossed
+///   pair cannot form.
+///
+/// Telling the pair apart as it happens would take a table of every
+/// source port in flight, and a getsockname for every connect, scans of
+/// other hosts included; this costs them nothing.
+fn connected(fd: std.posix.fd_t) Verdict {
     var local: std.posix.sockaddr.in = undefined;
     var peer: std.posix.sockaddr.in = undefined;
     var local_len: std.posix.socklen_t = @sizeOf(@TypeOf(local));
     var peer_len: std.posix.socklen_t = @sizeOf(@TypeOf(peer));
     if (std.c.getsockname(fd, @ptrCast(&local), &local_len) != 0) return .open;
     if (std.c.getpeername(fd, @ptrCast(&peer), &peer_len) != 0) return .open;
-    const self = local.port == peer.port and local.addr == peer.addr;
-    return if (self) .refused else .open;
+    if (local.addr != peer.addr) return .open;
+    return if (local.port == peer.port) .refused else .unconfirmed;
 }
 
 /// POSIX: only an actively refused connection proves "closed but
 /// present"; every other error (timeout, unreachable, ...) is silence.
-fn classify(so_error: c_int) Outcome {
+fn classify(so_error: c_int) Verdict {
     return switch (so_error) {
         0 => .open,
         @backingInt(std.posix.E.CONNREFUSED), @backingInt(std.posix.E.CONNRESET) => .refused,

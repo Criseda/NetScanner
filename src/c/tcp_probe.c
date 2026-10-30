@@ -28,11 +28,12 @@ static tcp_probe_result classify(int so_error) {
   }
 }
 
-// The verdict on a connect that succeeded: open, unless it reached its
-// own socket (local address and port equal the peer's). A connect to
-// one of the machine's own addresses that gets the target port as its
-// source port can complete as a simultaneous open with itself, with
-// nothing listening; see connected() in src/core/connects.zig.
+// The verdict on a connect that succeeded: open, unless it was to one
+// of the machine's own addresses (local address equal to the peer's).
+// Such a connect may have met itself (local port equal to the peer's
+// too: refused) or another connect of the scan going the other way
+// (unconfirmed, for the scan to connect to again on its own); see
+// connected() in src/core/connects.zig.
 static tcp_probe_result connected(SOCKET sock) {
   struct sockaddr_in local;
   struct sockaddr_in peer;
@@ -42,9 +43,11 @@ static tcp_probe_result connected(SOCKET sock) {
       getpeername(sock, (struct sockaddr *)&peer, &peer_len) != 0) {
     return TCP_PROBE_OPEN;
   }
-  const int self = local.sin_port == peer.sin_port &&
-                   local.sin_addr.s_addr == peer.sin_addr.s_addr;
-  return self ? TCP_PROBE_REFUSED : TCP_PROBE_OPEN;
+  if (local.sin_addr.s_addr != peer.sin_addr.s_addr) {
+    return TCP_PROBE_OPEN;
+  }
+  return local.sin_port == peer.sin_port ? TCP_PROBE_REFUSED
+                                         : TCP_PROBE_UNCONFIRMED;
 }
 
 // Make a refusal surface the moment its RST arrives. By default Windows

@@ -119,8 +119,9 @@ pub const TcpProbe = enum(c_int) {
     refused = 1,
     filtered = 2,
     pending = 3,
-    no_socket = 4,
-    no_address = 5,
+    unconfirmed = 4,
+    no_socket = 5,
+    no_address = 6,
 };
 
 fn toTcpProbe(raw: c_int) TcpProbe {
@@ -128,6 +129,7 @@ fn toTcpProbe(raw: c_int) TcpProbe {
         @backingInt(TcpProbe.open) => .open,
         @backingInt(TcpProbe.refused) => .refused,
         @backingInt(TcpProbe.pending) => .pending,
+        @backingInt(TcpProbe.unconfirmed) => .unconfirmed,
         @backingInt(TcpProbe.no_socket) => .no_socket,
         @backingInt(TcpProbe.no_address) => .no_address,
         else => .filtered,

@@ -28,6 +28,23 @@
   Not measured on Linux or Windows, where scans of a healthy system
   take the same path as before (one extra check per connect).
 
+- `ns -p` on the machine's own address no longer reports pairs of
+  ports that nothing listens on. Two of the scan's connects can meet
+  each other, one from port A to B while the other goes from B to A;
+  the OS completes both as a simultaneous open, and both ports looked
+  open. On macOS a full loopback scan reported such pairs of nearby
+  ephemeral ports (8-50 per affected run) in about 1 run in 200. A
+  connect to one of the machine's own addresses that succeeds is now
+  confirmed at the end of the scan with one more connect, made alone,
+  when no such pair can form. Scans of other hosts do no extra work.
+  On an M3 Pro Mac, ReleaseFast, interleaved in random order, 360 runs
+  each of `ns -p 127.0.0.1 1-65535 --json`: phantoms in 1 run before
+  (65184, 65187), in none after; all six listeners found in every run;
+  medians (p90) wall 0.397s (0.504s) -> 0.405s (0.504s), kernel CPU
+  1.07s (1.33s) -> 1.08s (1.31s), Mann-Whitney p = 0.23 and 0.35.
+  Windows (`tcp_probe.c`) gets the same check; Windows and native
+  Linux were not measured.
+
 - On macOS, scans spread their connects over at most 3 threads, not
   up to half the cores. A connect to a closed port on the machine
   itself is refused inside the connect call, under the kernel's TCP
