@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const utils = @import("utils.zig");
 const scanner = @import("scanner.zig");
+const connects = @import("connects.zig");
 const ports = @import("ports.zig");
 const progress = @import("progress.zig");
 const interrupt = @import("interrupt.zig");
@@ -144,7 +145,7 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process
     const interactive = setUpInteractive(io, env, json, &live);
 
     const started = std.Io.Clock.now(.awake, io);
-    var open_ports = try scanner.scanPorts(
+    var open_ports = scanner.scanPorts(
         allocator,
         io,
         ip_address,
@@ -158,7 +159,12 @@ fn runPortScan(allocator: std.mem.Allocator, io: std.Io, env: *const std.process
             .display = if (interactive) live.display() else null,
             .cancel = interrupt.flag(),
         },
-    );
+    ) catch |err| switch (err) {
+        // Better no answer than a wrong one: the ports it never got to
+        // would have looked closed.
+        error.OutOfSockets => fail(io, json, "Out of sockets: the system would not open one for {d}s, so the scan stopped (try again in a moment)", .{connects.STALL_LIMIT_NS / std.time.ns_per_s}),
+        else => return err,
+    };
     defer open_ports.deinit(allocator);
     const elapsed_ns = started.durationTo(std.Io.Clock.now(.awake, io)).nanoseconds;
 

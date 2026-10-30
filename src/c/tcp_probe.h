@@ -13,6 +13,12 @@ typedef enum {
   // Connected to one of the machine's own addresses: maybe a listener,
   // maybe another connect going the other way. Connect again, alone.
   TCP_PROBE_UNCONFIRMED,
+  // Not started, for want of something on this machine (see Shortage
+  // in src/core/connects.zig): no socket or buffers to be had...
+  TCP_PROBE_NO_SOCKET,
+  // ...or no local port to connect from, which may also be the
+  // target's doing (port 0, 0.0.0.0).
+  TCP_PROBE_NO_ADDRESS,
 } tcp_probe_result;
 
 // Most sockets one tcp_probe_wait call watches. MAX_IN_FLIGHT in
@@ -25,8 +31,9 @@ typedef enum {
 //
 // 1. tcp_probe_start begins a non-blocking connect to ip:port (four
 //    bytes, network order). It returns the verdict when the connect
-//    settles at once, or TCP_PROBE_PENDING with the socket in
-//    *out_sock.
+//    settles at once, TCP_PROBE_PENDING with the socket in *out_sock,
+//    or TCP_PROBE_NO_SOCKET / TCP_PROBE_NO_ADDRESS when it could not
+//    start at all.
 // 2. tcp_probe_wait waits up to wait_ms for any of `count` pending
 //    sockets to settle and sets settled[i] to 1 for each that did.
 //    Returns how many settled, or -1 on failure.
