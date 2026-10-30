@@ -35,11 +35,14 @@
   far host (no answer under 100 ms) is unchanged.
   ReleaseFast, old and new interleaved in one random order, medians
   (p90), every open port found in every run unless noted:
-  - Docker lab (Linux), 1-1024 (16 each): first SYN to 22 lost 0.503s
-    (0.504s) -> 0.103s (0.125s); closed ports dropped 0.806s (0.870s)
-    -> 0.638s (0.677s); 80 ms away (30 each) 0.275s (0.299s) -> 0.279s
-    (0.311s), within noise. 1-65535 (12 each): first SYN lost 0.503s
-    -> 0.159s; 5% loss and clean within noise.
+  - Docker lab (Linux, arm64 under OrbStack on an M3 Pro), 1-1024 (20
+    each): first SYN to 22 lost 0.511s (0.516s) -> 0.114s (0.116s);
+    closed ports dropped 0.840s (0.847s) -> 0.655s (0.665s); 5% of
+    SYNs lost 0.619s (0.627s) -> 0.220s (0.227s), where one lost SYN
+    in the burst held the scan; 80 ms away 0.272s (0.278s) -> 0.271s
+    (0.281s) and clean unchanged. 1-65535 (12 each): first SYN lost
+    0.514s (0.518s) -> 0.146s (0.174s); 5% loss 0.743s (0.747s) ->
+    0.660s (0.668s); clean unchanged.
   - Windows 11, wired: home router 1-1024 (12 each) 0.882s (0.891s) ->
     0.714s (0.725s), its rate-limited port 53 in 3 of 12 runs against
     0 of 12; a Raspberry Pi 1-1024 (20 each), scanme.nmap.org 1-1024
@@ -65,11 +68,12 @@
   127.0.0.1 1-65535`: Linux (arm64 VM on an M3 Pro Mac, 30 each)
   0.086s (0.091s) -> 0.073s (0.079s), against 0.065s taking batches;
   macOS 27 (M3 Pro, 40 each) 0.585s (0.818s) -> 0.567s (0.774s),
-  within noise; the router 1-1024 (14 each) and scanme.nmap.org 1-1024
-  (30 each) unchanged. Same ports found everywhere. Not measured in this form on Windows,
-  native Linux or the Docker lab; with batched takes, Windows loopback,
-  router and scanme were unchanged, and WSL2 loopback went 0.099s ->
-  0.077s.
+  within noise; the router 1-1024 (14 each), scanme.nmap.org 1-1024
+  (30 each) and the Docker lab's clean target, 1-1024 (20 each) and
+  1-65535 (12 each), unchanged. Same ports found everywhere. Not
+  measured in this form on Windows or native Linux; with batched
+  takes, Windows loopback, router and scanme were unchanged, and WSL2
+  loopback went 0.099s -> 0.077s.
 
 - A connect that the machine cannot start (no socket to be had, or no
   local port to send from) no longer counts as an unanswered port. It
