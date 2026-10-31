@@ -32,6 +32,23 @@ test "an adaptive window starts at its minimum" {
     try std.testing.expectEqual(@as(usize, 16), Window.init(16, 16, .adaptive).size);
 }
 
+test "an opening starts an adaptive window larger, and it still backs off to its minimum" {
+    var w = Window.init(128, 1024, .adaptive).opening(256);
+    try std.testing.expectEqual(@as(usize, 256), w.size);
+    try std.testing.expectEqual(@as(usize, 16), Window.init(16, 16, .adaptive).opening(256).size);
+    try std.testing.expectEqual(@as(usize, 256), Window.init(256, 1024, .adaptive).opening(128).size);
+
+    w.observe(.refused, 1_000, 0); // fastest: 1 ms
+    w.observe(.refused, 80_000, 10 * ms); // queueing: halve
+    w.observe(.refused, 80_000, 100 * ms); // a round trip later: halve again
+    try std.testing.expectEqual(@as(usize, 128), w.size);
+}
+
+test "an opening leaves fixed and pool-paced windows alone" {
+    try std.testing.expectEqual(@as(usize, 1024), Window.init(1, 1024, .fixed).opening(256).size);
+    try std.testing.expectEqual(@as(usize, 128), Window.init(128, 1024, .pool).opening(256).size);
+}
+
 test "prompt answers and silence both grow the window, up to its maximum" {
     var w = Window.init(64, 64 + 3, .adaptive);
     w.observe(.refused, 1_000, 0);

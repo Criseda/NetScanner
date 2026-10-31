@@ -62,6 +62,29 @@ one random order, medians (p90)):
 
 Changes:
 
+- On macOS, a port scan opens with 256 connects in flight, as on Linux
+  and Windows, instead of 128. A far host's scan takes a few round
+  trips of the window, which doubles each one, so a 1-1024 scan of a
+  host 150-260 ms away took four round trips instead of three; a
+  filtered port then holds the scan for its full 500 ms wait from
+  wherever it lands in that order. Only the opening changes: when
+  answers slow down the window still backs off to 128, never below.
+  Linux and Windows already opened at 256 and are unchanged.
+  M3 Pro (macOS 27.0.1, Wi-Fi), signed ReleaseFast, interleaved in one
+  random order, medians (p90): scanme.nmap.org 1-1024 (20 each)
+  v1.7.0 0.877s (0.976s), `main` 0.953s (0.981s), new 0.741s (0.921s),
+  and in an earlier set of 30 each 0.872s, 0.944s and 0.767s; 1-8192
+  (30 each) 3.69s -> 3.59s; 22 and 80 every run. `main`'s extra 70 ms
+  came with trying the most common ports first: scanme's filtered port
+  427 went out later. On the LAN the opening lasts a few milliseconds,
+  and nothing changed: full ranges of a Google TV device with 10 open
+  ports (20 each, 4.48s -> 4.46s, p = 0.97) and the router (6 each,
+  44.3s -> 45.0s, p = 0.23) found every port in every run; a Wi-Fi Echo
+  (8 each) dropped some of its 7 once on each side; the router, a
+  camera and an AV receiver 1-1024 and loopback 1-65535 (16-30 each)
+  within noise. Not measured: the iPhone and mesh router that set
+  macOS's 128, which are not on this network.
+
 - `--hostname` takes a fraction of the time it did, most of all on
   Windows (#107). There the reverse DNS lookup asks DNS only: Windows'
   getnameinfo went on, once DNS had no name, to LLMNR and NetBIOS over
