@@ -1,6 +1,66 @@
 # Changelog
 
-## Unreleased
+## v1.8.0
+
+`--hostname` in a fraction of the time, most of all on Windows; port
+scans that find the open ports a lossy or rate-limiting host used to
+hide, and no longer hold their opening burst for 500 ms on one; no
+phantom ports on the machine's own addresses; names for 102 more
+ports. Compared with v1.7.0 (ReleaseFast, old and new interleaved in
+one random order, medians (p90)):
+
+- Windows 11 (wired, 2 s of quiet before each run, 5 s before sweeps):
+  `ns -p` on the home router 1-1024 (16 each) 0.874s (0.890s) ->
+  0.709s (0.723s), its rate-limited DNS port 53 found in 16 of 16
+  runs instead of 0; 1-65535 (12 each) 14.90s (14.99s) -> 14.67s
+  (14.71s), port 53 in 5 of 12 runs instead of 0 and its UPnP port
+  49152 in 1 of 12 (over 49100-49200, v1.8.0 finds it every time and
+  v1.7.0 never); loopback 1-65535 (16 each) 2.86s (2.91s) -> 2.54s
+  (2.63s), the same 27 listeners every run; a Raspberry Pi 1-1024 (16
+  each) 0.071s -> 0.066s; scanme.nmap.org 1-1024 (14 each) 0.701s ->
+  0.709s, within noise, 22 and 80 every run. `ns -s` on the /24 (30
+  each) 0.557s (1.335s) both, bimodal on both sides, 9 hosts every
+  run; `ns -s --hostname` (12 each) 5.98s (6.72s) -> 0.83s (1.32s),
+  the same 4 names every run.
+- WSL2 on the same machine (NAT, Linux 6.18): loopback 1-65535 (30
+  each) 0.098s (0.109s) -> 0.093s (0.103s), and v1.7.0 reported 33
+  ephemeral ports open in one run, two of the scan's own sockets
+  connected to each other (#109); the Pi 1-1024 (16 each) 0.605s
+  (0.623s) -> 0.267s (0.304s), SSH missed once by v1.7.0; the router
+  1-1024 (16 each) 0.816s (0.887s) -> 0.655s (0.714s), port 53 in 9
+  of 16 runs against 7, and both missed port 80 once through the NAT;
+  scanme.nmap.org 1-1024 (14 each) 0.850s both.
+- Linux (Docker lab, `scripts/bench.py`, under Docker Desktop on the
+  same machine), 1-1024 (16 each): the first SYN to port 22 lost
+  0.502s (0.503s) -> 0.102s (0.129s), v1.7.0 missing port 22 in 10 of
+  16 runs; 5% of SYNs lost 0.603s (0.606s) -> 0.235s (0.258s), all
+  ports found in 16 of 16 runs instead of 12; closed ports dropped
+  0.805s (0.806s) -> 0.636s (0.650s); clean and 80 ms away unchanged.
+  1-65535 (12 each): first SYN lost 0.502s (0.503s) -> 0.159s
+  (0.170s), all found in 12 of 12 runs instead of 1; 5% loss 0.764s
+  -> 0.752s, within noise, all found in 12 of 12 instead of 9; clean
+  0.152s -> 0.146s, within noise.
+- macOS 27.0.1 (M3 Pro, 11 cores, Wi-Fi, signed builds, 2 s of quiet
+  before each run, 2.5 s before loopback scans, 5 s before sweeps):
+  `ns -p 127.0.0.1 1-65535` (30 each) 0.525s (0.617s) -> 0.427s
+  (0.512s), kernel CPU 2.25s -> 1.13s, the same 6 listeners every
+  run; the home router 1-1024 (16 each) 0.377s (0.673s) -> 0.383s
+  (0.664s), within noise, 53, 80 and 443 every run; its 1-65535 (6
+  each) 44.1s (45.0s) -> 44.5s (45.5s), within noise, kernel CPU
+  32.6s -> 27.6s, all five open ports in 6 of 6 runs instead of 3; a
+  security camera and an AV receiver 1-1024 (16 each) within noise,
+  the same ports every run. scanme.nmap.org 1-1024 (80 each, over
+  three sets), 150-260 ms away from here: 0.889s (0.952s) -> 0.911s
+  (0.973s), 22 and 80 every run. Those 20 ms came with trying the
+  most common ports first (#87): v1.7.0 0.873s, #87's merge 0.894s,
+  v1.8.0 0.895s (30 each, interleaved), while Windows (above) shows
+  +8 ms within noise and WSL2 none. `ns -s` on a /23 (20 each) 0.525s
+  (0.533s) -> 0.531s (0.534s), within noise, 29-41 hosts on both
+  sides as Wi-Fi devices came and went; `ns -s --hostname` (14 each)
+  1.548s (1.787s) -> 0.930s (0.957s), each of the 8 names found
+  about as often as its host was seen on both sides.
+
+Changes:
 
 - `--hostname` takes a fraction of the time it did, most of all on
   Windows (#107). There the reverse DNS lookup asks DNS only: Windows'
