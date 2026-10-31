@@ -40,7 +40,25 @@ one random order, medians (p90)):
   (0.170s), all found in 12 of 12 runs instead of 1; 5% loss 0.764s
   -> 0.752s, within noise, all found in 12 of 12 instead of 9; clean
   0.152s -> 0.146s, within noise.
-- macOS: not yet measured.
+- macOS 27.0.1 (M3 Pro, 11 cores, Wi-Fi, signed builds, 2 s of quiet
+  before each run, 2.5 s before loopback scans, 5 s before sweeps):
+  `ns -p 127.0.0.1 1-65535` (30 each) 0.525s (0.617s) -> 0.427s
+  (0.512s), kernel CPU 2.25s -> 1.13s, the same 6 listeners every
+  run; the home router 1-1024 (16 each) 0.377s (0.673s) -> 0.383s
+  (0.664s), within noise, 53, 80 and 443 every run; its 1-65535 (6
+  each) 44.1s (45.0s) -> 44.5s (45.5s), within noise, kernel CPU
+  32.6s -> 27.6s, all five open ports in 6 of 6 runs instead of 3; a
+  security camera and an AV receiver 1-1024 (16 each) within noise,
+  the same ports every run. scanme.nmap.org 1-1024 (80 each, over
+  three sets), 150-260 ms away from here: 0.889s (0.952s) -> 0.911s
+  (0.973s), 22 and 80 every run. Those 20 ms came with trying the
+  most common ports first (#87): v1.7.0 0.873s, #87's merge 0.894s,
+  v1.8.0 0.895s (30 each, interleaved), while Windows (above) shows
+  +8 ms within noise and WSL2 none. `ns -s` on a /23 (20 each) 0.525s
+  (0.533s) -> 0.531s (0.534s), within noise, 29-41 hosts on both
+  sides as Wi-Fi devices came and went; `ns -s --hostname` (14 each)
+  1.548s (1.787s) -> 0.930s (0.957s), each of the 8 names found
+  about as often as its host was seen on both sides.
 
 Changes:
 
