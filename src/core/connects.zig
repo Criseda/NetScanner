@@ -106,9 +106,9 @@ pub fn inFlightLimit() usize {
 /// Make every connect `source` hands out and report each result back
 /// to it. Returns once `source` has no more and every connect has
 /// settled. How many are in flight at once is up to a Window: it
-/// starts at the old thread pool's pace (POOL_PACE), grows while
-/// answers come back promptly, and backs off when they slow down, never
-/// below where it started nor past inFlightLimit().
+/// starts at OPENING_PACE, grows while answers come back promptly, and
+/// backs off when they slow down, never below the old thread pool's
+/// pace (POOL_PACE) nor past inFlightLimit().
 ///
 /// `source` is a pointer to anything with two methods:
 /// - `next() ?Job`: the next connect, or null when there are no more
@@ -146,7 +146,7 @@ pub fn run(comptime Job: type, allocator: std.mem.Allocator, io: std.Io, source:
         .allocator = allocator,
         .loops = loops,
         // Every loop holds at least one connect.
-        .window = .init(@max(loops, @min(POOL_PACE, limit)), limit, pace),
+        .window = Window.init(@max(loops, @min(POOL_PACE, limit)), limit, pace).opening(OPENING_PACE),
     };
     defer shared.unconfirmed.deinit(allocator);
     // Each loop can hold an even share of the largest window.
@@ -197,6 +197,19 @@ const MAX_PAUSE_NS = 100 * std.time.ns_per_ms;
 /// tripping the delay signal, and the window settled under the old
 /// pool, making those scans 15-20% slower than before.
 pub const POOL_PACE: usize = if (builtin.os.tag == .macos) 128 else 256;
+
+/// How many connects an adaptive window starts with: POOL_PACE on Linux
+/// and Windows, but more than macOS's. A far host's scan is a few
+/// round trips of the window, which doubles each one, so on macOS
+/// 1-1024 took four round trips instead of three. scanme.nmap.org,
+/// 150-260 ms from an M3 Pro on Wi-Fi, took 0.94s for 1-1024 where 0.77s
+/// would do. Only the opening changes: the window still backs off to
+/// POOL_PACE, never below, when answers slow down, so the hosts that
+/// set macOS's pace (see POOL_PACE) still get it once they struggle.
+/// The probes that open a scan go to the ports most often open (see
+/// scanner.zig's nextFirstPort), so a host that answers only the
+/// first few of a burst still answers those.
+pub const OPENING_PACE: usize = 256;
 
 /// Most threads one run spreads its connects over. On a fast answer
 /// (loopback, or a LAN host refusing closed ports) the cost is in the
@@ -270,10 +283,10 @@ pub const Pace = enum {
 /// home router does exactly this well before the old thread pool's
 /// pace. So the window halves whenever an answer takes much longer than
 /// the fastest one seen, at most once per round trip. Otherwise it
-/// grows by one per settled connect, doubling every round. It starts,
-/// and stays at least, at `min`, the old thread pool's pace (see
-/// POOL_PACE): a host that copes with that is never asked to take
-/// less. (Growing only one per round after a cut, as TCP does, left the
+/// grows by one per settled connect, doubling every round. It stays at
+/// least at `min`, the old thread pool's pace (see POOL_PACE): a host
+/// that copes with that is never asked to take less. It starts there
+/// too, unless `opening` sets a larger start. (Growing only one per round after a cut, as TCP does, left the
 /// window small for the rest of a scan after a single slow answer.)
 ///
 /// Silence alone never shrinks it: a host that drops closed ports
@@ -326,6 +339,15 @@ pub const Window = struct {
             .max = if (pace == .pool) min else max,
             .adaptive = pace == .adaptive,
         };
+    }
+
+    /// The same window, starting at `size` instead of its minimum when
+    /// adaptive (see OPENING_PACE), within its bounds. Fixed and pool
+    /// paces keep their one size.
+    pub fn opening(self: Window, size: usize) Window {
+        var w = self;
+        if (w.adaptive) w.size = std.math.clamp(size, w.min, w.max);
+        return w;
     }
 
     /// One connect settled at `now_ns`, after `rtt_us`.
